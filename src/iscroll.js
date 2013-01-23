@@ -2,7 +2,7 @@
 /*global DocumentTouch: false */
 
 /*!
- * Code based on iScroll v5.0.0 pre-alpha-use-it-and-kittens-die ~ Copyright (c) 2012 Matteo Spinelli, http://cubiq.org
+ * Portions of this file based on iScroll v5.0.0 pre-alpha-use-it-and-kittens-die ~ Copyright (c) 2012 Matteo Spinelli, http://cubiq.org
  * Released under MIT license, http://cubiq.org/license
  */
  /*
@@ -113,9 +113,8 @@
 			minDistanceToLock: 5, //in pixels, if movement in one direction is X greater than the other, lock the movement direction
 			outOfBoundsSpeedReduction: 0.3, //0-1 the percentage of distance to move scroller vs finger movement when past max scroll bounds
 			snapTime: 200, //in ms, the amount of time to animate scrolling when snapping to a specific point on scrollEnd
-			//todo: this might need to change based on actual platform framerate
-			deceleration: -0.02, //used to calculate the distance traveled during a momentum scroll, not used to calculate intermediate steps
-			momentumTime: 1500 //in ms
+			friction: 0.95, //used in easing animation during a momentum scroll where velocities are supplied
+			minVelocityToDecelerate: 0.2
 		};
 
 	function addEvent(el, type, fn, capture) {
@@ -132,9 +131,7 @@
 		if (this instanceof IScroll === false) {
 			return new IScroll(el, options);
 		}
-		var i, //iterator
-			vsb, //vertical scrollbar
-			hsb; //horizontal scrollbar
+		var i; //iterator
 
 		this.wrapper = typeof el === 'string' ? d.querySelector(el) : el;
 		this.scroller = this.wrapper.children[0];
@@ -145,13 +142,17 @@
 			startY: 0,
 			scrollX: false,
 			scrollY: true,
+			vScrollbarWrapperClass: '',
+			vScrollbarClass: '',
+			hScrollbarWrapperClass: '',
+			hScrollbarClass: '',
 			lockDirection: true,
-			//bounce: true,				TODO: remove scroller bouncing
 			momentum: true,
+			overshoot: true,
 			//eventPassthrough: false,	TODO: preserve native vertical scroll on horizontal JS scroll (and vice versa)
 
 			HWCompositing: true,		// mostly a debug thing (set to false to skip hardware acceleration)
-			useTransition: true,		//You may want to set this to false if requestAnimationFrame exists and is not shim
+			useTransition: false,		//You may want to set this to false if requestAnimationFrame exists and is not shim
 			useTransform: true,
 
 			scrollbars: true,
@@ -172,14 +173,10 @@
 
 			zoom: false,
 			zoomMin: 1,
-			zoomMax: 3,
+			zoomMax: 3
 			//startZomm: 1,				TODO: the initial zoom level
 
 			//onFlick: null,			TODO: add flick custom event
-			vScrollbarWrapperClass: '',
-			vScrollbarClass: '',
-			hScrollbarWrapperClass: '',
-			hScrollbarClass: ''
 		};
 
 		for (i in options) {
@@ -210,40 +207,15 @@
 		this.positions = [];//save off positions user has scrolled to along with timestamp for momemtum purposes
 
 		if (this.options.useTransition) {
-			this.scroller.style[transitionTimingFunction] = 'cubic-bezier(0.08,0.50,0.0,1)';
+			this.scroller.style[transitionTimingFunction] = 'cubic-bezier(0.33,0.66,0.66,1)';
 		}
 
 		if (this.options.scrollbars === true) {
-			//todo: move setup work into constructor.
 			if (this.options.scrollY) {
-				// Vertical scrollbar wrapper
-				vsb = d.createElement('div');
-				if (this.options.vScrollbarWrapperClass.length) {
-					vsb.className += this.options.vScrollbarWrapperClass;
-				} else {
-					vsb.style.cssText = 'position:absolute;z-index:1;width:7px;bottom:2px;top:2px;right:1px';
-				}
-
-				if (!this.options.interactiveScrollbars) {
-					vsb.style.pointerEvents = 'none'; //todo: check if we need vendor specific here
-				}
-				this.wrapper.appendChild(vsb);
-				this.vScrollbar = new Scrollbar(vsb, this, 'v');
+				this.vScrollbar = new Scrollbar(this, 'v');
 			}
 			if (this.options.scrollX) {
-				// Horizontal scrollbar wrapper
-				hsb = d.createElement('div');
-				if (this.options.hScrollbarWrapperClass.length) {
-					hsb.className += this.options.hScrollbarWrapperClass;
-				} else {
-					hsb.style.cssText = 'position:absolute;z-index:1;height:7px;left:2px;right:2px;bottom:0';
-				}
-
-				if (!this.options.interactiveScrollbars) {
-					hsb.style.pointerEvents = 'none';
-				}
-				this.wrapper.appendChild(hsb);
-				this.hScrollbar = new Scrollbar(hsb, this, 'h');
+				this.hScrollbar = new Scrollbar(this, 'h');
 			}
 		}
 		//refresh finishes the setup work
@@ -258,8 +230,8 @@
 		}
 
 		addEvent(this.scroller, eventTransitionEnd, this);
-		addEvent(this.scroller, 'mouseover', this);
-		addEvent(this.scroller, 'mouseout', this);
+		addEvent(this.wrapper, 'mouseover', this);
+		addEvent(this.wrapper, 'mouseout', this);
 
 		if (this.options.mouseWheel) {
 			addEvent(this.wrapper, 'DOMMouseScroll', this);
@@ -317,41 +289,121 @@
 			}
 		},
 
-		//uses requestAnimationFrame to animate scrolling
-
-		__animate: function (destX, destY) {
-			var that = this,
-				startX = this.x,
-				startY = this.y,
-				distX = startX - destX,
-				distY = startY - destY,
-				startTime = getTime(),
-				destTime = startTime + config.momentumTime,
+		__animateVelocity: function (velocityX, velocityY) {
+			var self = this,
+				lastTime = getTime(),
 				now,
-				multiplier;
+				newX,
+				newY;
 
-			//todo: rAF handlers are sent a timestamp object, but standards have chnaged. Consider using instead of creating another
+			if (!velocityX && !velocityY) {
+				return;
+			}
+
 			function step() {
 				now = getTime();
 
-				if (now >= destTime) {
-					that.isRAFing = false;
-					that.__pos(destX, destY);
-					that.resetPosition(false);
-					return;
+				//if velocity is low enough, stop animating on that axis
+				if (M.abs(velocityX) > config.minVelocityToDecelerate) {
+					velocityX *= config.friction;
+				} else {
+					velocityX = 0;
+				}
+				if (M.abs(velocityY) > config.minVelocityToDecelerate) {
+					velocityY *= config.friction;
+				} else {
+					velocityY = 0;
 				}
 
-				//on iOS at least native scrolling shows exponential decay
-				multiplier = Math.exp(-(now - startTime) / (config.momentumTime / 6));
-				that.__pos(destX + distX * multiplier, destY + distY * multiplier);
+				newX = self.x + velocityX * (now - lastTime);
+				newY = self.y + velocityY * (now - lastTime);
 
-				if (that.isRAFing) {
+				//add mucho resistance if outside boundaries and can overshoot, otherwise hard stop
+				if (self.x > 0 || self.x < self.maxScrollX) {
+					if (self.options.overshoot) {
+						velocityX *= config.friction * config.friction;
+					} else {
+						newX = self.x > 0 ? 0 : self.maxScrollX;
+						velocityX = 0;
+					}
+				}
+				if (self.y > 0 || self.y < self.maxScrollY) {
+					if (self.options.overshoot) {
+						velocityY *= config.friction * config.friction;
+					} else {
+						newY = self.y > 0 ? 0 : self.maxScrollX;
+					}
+				}
+				console.log('velocity x ' + velocityX);
+				console.log('velocity y' + velocityY + ' y ' + newY);
+				self.__pos(newX, newY);
+
+				//if there is no more velocity, we are done animating
+				if (velocityX === 0 && velocityY === 0) {
+					self.isRAFing = false;
+				}
+
+				lastTime = now;
+
+				if (self.isRAFing) {
 					rAF(step);
+				} else {
+					self.resetPosition(false);
 				}
 			}
 
 			this.isRAFing = true;
 			step();
+		},
+
+		/**
+		 * uses requestAnimationFrame or shim to move scroller to destination.
+		 * @param  {number}			destX		the destination on x axis.
+		 * @param  {number}			destY		the destination on y axis.
+		 * @param  {number}			duration	the duration of the animation.
+		 */
+		__animate: function (destX, destY, duration) {
+			var self = this,
+				startX,
+				startY,
+				distX,
+				distY,
+				destTime,
+				startTime = getTime(),
+				now,
+				easing,
+				step,
+				newX,
+				newY;
+
+			startX = this.x;
+			startY = this.y;
+			distX = startX - destX;
+			distY = startY - destY;
+			destTime = startTime + duration;
+			//todo: rAF handlers are sent a timestamp object, but standards have chnaged. Consider using instead of creating another
+			step = function () {
+				now = getTime();
+
+				if (now >= destTime) {
+					self.isRAFing = false;
+					self.__pos(destX, destY);
+					self.resetPosition(false);
+					return;
+				}
+
+				now = (now - startTime) / duration - 1;
+				easing = M.sqrt(1 - now * now);
+				newX = (destX - startX) * easing + startX;
+				newY = (destY - startY) * easing + startY;
+				self.__pos(newX, newY);
+
+				if (self.isRAFing) {
+					rAF(step);
+				}
+			};
+			self.isRAFing = true;
+			rAF(step);
 		},
 
 		__resize: function () {
@@ -390,7 +442,7 @@
 			}
 			this.resetPosition(true);
 
-			this.__transitionOff(true);
+			this.__transitionTime(0);
 		},
 
 		__start: function (e) {
@@ -432,7 +484,7 @@
 			this.directionY		= 0;
 			this.directionLocked = 0;
 
-			this.__transitionOff(true);
+			this.__transitionTime(0);
 
 			this.isRAFing = false;		// stop the rAF animation (only with useTransition:false)
 
@@ -545,7 +597,7 @@
 			this.directionY = deltaY > 0 ? -1 : deltaY < 0 ? 1 : 0;
 
 			this.positions.push(timestamp, newX, newY);
-			this.scrollTo(newX, newY, true);
+			this.scrollTo(newX, newY, 0);
 		},
 
 		__end: function (e) {
@@ -554,8 +606,8 @@
 			}
 
 			var point		= hasPointer ? e : e.changedTouches[0],
-				momentumX,
-				momentumY,
+				velocityX,
+				velocityY,
 				duration	= getTime() - this.startTime,
 				newX		= this.x,
 				newY		= this.y,
@@ -627,8 +679,8 @@
 			}
 
 			if (this.options.momentum) {
-				newX = this.hasHorizontalScroll ? this.__momentum('h') : this.x;
-				newY = this.hasVerticalScroll ? this.__momentum('v') : this.y;
+				velocityX = this.hasHorizontalScroll ? this.__momentum('h') : 0;
+				velocityY = this.hasVerticalScroll ? this.__momentum('v') : 0;
 			}
 
 			if (this.options.snap) {
@@ -639,26 +691,23 @@
 				this.pageY = snap.pageY;
 			}
 
-			if (newX !== this.x || newY !== this.y) {
-				this.scrollTo(newX, newY);
+			if (newX !== this.x || newY !== this.y || velocityX !== 0 || velocityY !== 0) {
+				this.scrollTo(newX, newY, config.snapTime, velocityX, velocityY);
 			}
 		},
 
-		//todo: in progress
 		//todo: consider setting a maximum distance for these, in pixels
 		__momentum: function (dir) {
 			var distance,
 				velocity,
-				destination,
 				i				= this.positions.length - 3,
 				lastPosition	= this.positions[this.positions.length - 3];
 
 			while (lastPosition - this.positions[i] < 100) {
 				i -= 3;
-				//todo: what if change up/down/up/down in 100ms
 			}
 			if (i < 0) { //total scrolling less than 100ms, don't do momentum
-				return dir === 'h' ? this.x : this.y;
+				return {destination: dir === 'h' ? this.x : this.y, duration: 0};
 			}
 			//velocity ^ 2 = initial velocity ^ 2 + 2 * acceleration * distance
 
@@ -666,24 +715,23 @@
 			//velocity = distance / time
 			velocity = distance / (lastPosition - this.positions[i]); // pixels / ms
 
-			destination =  -(velocity * velocity) / (2 * (config.deceleration * (velocity < 0 ? -1 : 1))) + (dir === 'h' ? this.x : this.y);
-
-			if (Math.abs(velocity) < config.minVelocityForMomentum) {
-				return dir === 'h' ? this.x : this.y;
+			console.log('velocity ' + velocity);
+			if (M.abs(velocity) < config.minVelocityForMomentum) {
+				return 0;
+			} else {
+				return velocity;
 			}
-
-			return M.round(destination);
 		},
 
-		__transitionOff: function (isOff) {
-
-			this.scroller.style[transitionDuration] = (isOff ? 0 : config.momentumTime) + 'ms';
+		__transitionTime: function (duration) {
+			duration = duration || 0;
+			this.scroller.style[transitionDuration] = duration + 'ms';
 
 			if (this.hasHorizontalScroll) {
-				this.hScrollbar.indicator.transitionOff(isOff);
+				this.hScrollbar.indicator.transitionTime(duration);
 			}
 			if (this.hasVerticalScroll) {
-				this.vScrollbar.indicator.transitionOff(isOff);
+				this.vScrollbar.indicator.transitionTime(duration);
 			}
 		},
 
@@ -718,7 +766,7 @@
 				deltaY = this.maxScrollY;
 			}
 
-			this.scrollTo(deltaX, deltaY, true);
+			this.scrollTo(deltaX, deltaY, 0);
 		},
 		//todo: doesn't work with pointer events
 		__zoom: function (e) {
@@ -749,7 +797,7 @@
 			//this.scroller.style[transform] = 'translate(' + x + 'px,' + y + 'px) scale(' + scale + ')' + translateZ;
 
 			this.scale = scale;
-			this.scrollTo(x, y, true);
+			this.scrollTo(x, y, 0);
 			this.scaled = true;
 		},
 
@@ -980,29 +1028,26 @@
 				y = this.maxScrollY;
 			}
 
-			this.scrollTo(x, y, immediate);
+			this.scrollTo(x, y, immediate ? 0 : config.snapTime);
 
 			return true;
 		},
 
-		scrollBy: function (x, y, immediate) {
+		scrollBy: function (x, y, duration) {
 			x = this.x + x;
 			y = this.y + y;
 
-			this.scrollTo(x, y, immediate);
+			this.scrollTo(x, y, duration);
 		},
 
-		//immediate is a boolean
-		scrollTo: function (x, y, immediate) {
-			if (immediate || this.options.useTransition) {
-				if (immediate) {
-					this.__transitionOff(true);
-				} else {
-					this.__transitionOff(false);
-				}
+		scrollTo: function (x, y, duration, velocityX, velocityY) {
+			if (!duration || this.options.useTransition) {
+				this.__transitionTime(duration);
 				this.__pos(x, y);
+			} else if (velocityX || velocityY) {
+				this.__animateVelocity(velocityX, velocityY);
 			} else {
-				this.__animate(x, y);
+				this.__animate(x, y, duration);
 			}
 		},
 
@@ -1036,6 +1081,14 @@
 		this.position = defaults.position;
 		this.size = 0;
 		this.sizeProperty = this.direction === 'v' ? 'height' : 'width';
+		this.el.style[transitionTimingFunction] = 'cubic-bezier(0.33,0.66,0.66,1)'; //todo: place in config file
+		this.el.style[transform] = translateZ;
+
+		if (this.scrollbar.scroller.options[this.direction + 'ScrollbarClass']) {
+			this.el.className = this.scrollbar.scroller.options[this.direction + 'ScrollbarClass'];
+		} else {
+			this.el.style.cssText = cssVendor + 'box-sizing:border-box;box-sizing:border-box;position:absolute;background:rgba(0,0,0,0.5);border:1px;border-radius:3px';
+		}
 
 		this.scrollbar.el.appendChild(this.el);
 
@@ -1043,9 +1096,8 @@
 	}
 
 	Indicator.prototype = {
-		//todo: this is never called
 		refresh: function (size, maxScroll, position) {
-			this.transitionOff(true); //todo: function does not exist on object
+			this.transitionTime(0);
 
 			this.size = M.max(M.round(this.scrollbar.size * this.scrollbar.size / size), 8);
 			this.el.style[this.sizeProperty] = this.size + 'px';
@@ -1072,21 +1124,29 @@
 			}
 		},
 
-		transitionOff: function (isOff) {
-			this.el.style[transitionDuration] = (isOff ? 0 : config.momentumTime) + 'ms';
+		transitionTime: function (duration) {
+			duration = duration || 0;
+			this.el.style[transitionDuration] = duration + 'ms';
 		}
 	};
 
 
 	/* ---- SCROLLBAR ---- */
 
-	Scrollbar = function (el, scroller, dir) {
+	Scrollbar = function (scroller, dir) {
 		var indicator;
 
-		this.el = typeof el === 'string' ? d.querySelector(el) : el;
+		this.el = d.createElement('div');
+		this.direction = dir;
 		this.scroller = scroller;
 
-		this.direction = dir;
+		if (this.scroller.options[this.direction + 'ScrollbarWrapperClass']) {
+			this.el.className += this.scroller.options.vScrollbarWrapperClass;
+		} else {
+			this.el.style.cssText = 'position:absolute;z-index:1;width:7px;bottom:2px;top:2px;right:1px';
+		}
+
+		this.scroller.wrapper.appendChild(this.el);
 
 		if (this.direction === 'h') {
 			this.sizeProperty = 'height';
@@ -1101,9 +1161,14 @@
 		this.size = 0;
 		this.currentPointer = null;
 
-		addEvent(this.indicator.el, eventStart, this);
-		//addEvent(this.el, 'mouseover', this);
-		//addEvent(this.el, 'mouseout', this);
+		if (!this.scroller.options.interactiveScrollbars) {
+			this.el.style.pointerEvents = 'none'; //todo: check if we need vendor specific here
+		} else {
+			addEvent(this.indicator.el, eventStart, this);
+			//addEvent(this.el, 'mouseover', this);
+			//addEvent(this.el, 'mouseout', this);
+		}
+		//todo: create up/down arrows
 	};
 
 	Scrollbar.prototype = {
@@ -1124,6 +1189,7 @@
 				this.__end(e);
 				break;
 			}
+			//todo: need event for clicking track
 		},
 
 		__start: function (e) {
@@ -1150,7 +1216,7 @@
 			this.initiated	= true;
 			this.overshot	= 0;
 
-			this.indicator.transitionOff(true);
+			this.indicator.transitionTime(0);
 
 			//store current position to calculate difference on move
 			this.lastPoint	= e[this.page];
@@ -1196,9 +1262,9 @@
 			newPos = delta / this.indicator.sizeRatio;
 
 			if (this.direction === 'v') {
-				this.scroller.scrollBy(0, newPos, true);
+				this.scroller.scrollBy(0, newPos, 0);
 			} else {
-				this.scroller.scrollBy(newPos, 0, true);
+				this.scroller.scrollBy(newPos, 0, 0);
 			}
 
 			e.preventDefault();
@@ -1242,8 +1308,9 @@
 			this.el.style.backgroundColor = 'rgba(255,255,255,0.4)';
 			//todo: this.indicator.over();
 			this.indicator.el.style[transitionDuration] = '0.15s';
-			this.indicator.el.style.borderRadius = '7px';
+			this.indicator.el.style.borderWidth = '7px';
 			this.indicator.el.style.backgroundColor = 'green';//todo: remove test code
+			this.indicator.el.style.width = '7px';
 		},
 
 		out: function () {
@@ -1256,8 +1323,9 @@
 			this.el.style.backgroundColor = 'rgba(255,255,255,0)';
 			//todo: this.indicator.out()
 			this.indicator.el.style[transitionDuration] = '0.1s';
-			this.indicator.el.style.borderRadius = '3px';
+			this.indicator.el.style.borderWidth = '3px';
 			this.indicator.el.style.backgroundColor = 'transparent'; //todo: remove test code
+			this.indicator.el.style.width = '0px';
 		},
 
 		pos: function (position) {
@@ -1265,7 +1333,7 @@
 		},
 		//todo: document what the refresh is doing
 		refresh: function (size, maxScroll, position) {
-			this.indicator.transitionOff(true);
+			this.indicator.transitionTime(0);
 
 			if (this.direction === 'h') {
 				this.el.style.display = this.scroller.hasHorizontalScroll ? 'block' : 'none';
