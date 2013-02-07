@@ -14,8 +14,357 @@
 	zooming doesn't consider pointer model, use advanced gestures.
 	dispatch relevent events
 	destroy function
+
+	Bug: Cubic Bezier starting velocity does not match initial velocity well over a range of values
+
+	TODO: If momentum goes past max bounds, find where that happens, add new timing after to increase friction, queue that up for scrollTo
+
+	Consider limited the bounceback to when velocity at max point is greater than a certain threshold.
+
+	Check for conflicts in global scope with new objects
 	
  */
+var IScroll, CubicBezier, ScrollAnimation;
+
+
+(function () {
+	//https://github.com/davidaurelio/css-beziers/commit/02adac1a3b7f7d07416697ec233c64ba7d144ccb
+	/**
+	 * @license
+	 *
+	 * Copyright (C) 2008 Apple Inc. All Rights Reserved.
+	 * Copyright (C) 2010 David Aurelio. All Rights Reserved.
+	 * Copyright (C) 2010 uxebu Consulting Ltd. & Co. KG. All Rights Reserved.
+	 *
+	 * Redistribution and use in source and binary forms, with or without
+	 * modification, are permitted provided that the following conditions
+	 * are met:
+	 * 1. Redistributions of source code must retain the above copyright
+	 *    notice, this list of conditions and the following disclaimer.
+	 * 2. Redistributions in binary form must reproduce the above copyright
+	 *    notice, this list of conditions and the following disclaimer in the
+	 *    documentation and/or other materials provided with the distribution.
+	 *
+	 * THIS SOFTWARE IS PROVIDED BY APPLE INC., DAVID AURELIO, AND UXEBU
+	 * CONSULTING LTD. & CO. KG ``AS IS'' AND ANY EXPRESS OR IMPLIED
+	 * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+	 * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+	 * IN NO EVENT SHALL APPLE INC. OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+	 * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+	 * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+	 * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+	 * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+	 * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+	 * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+	 * POSSIBILITY OF SUCH DAMAGE.
+	 */
+	'use strict';
+
+	/**
+	 * Represents a two-dimensional cubic bezier curve with the starting
+	 * point (0, 0) and the end point (1, 1). The two control points p1 and p2
+	 * have x and y coordinates between 0 and 1.
+	 *
+	 * This type of bezier curves can be used as CSS transform timing functions.
+	 */
+	CubicBezier = function (p1x, p1y, p2x, p2y) {
+		if (!(p1x >= 0 && p1x <= 1)) {
+			throw new RangeError('"p1x" must be a number between 0 and 1. ' + 'Got ' + p1x + 'instead.');
+		}
+		if (!(p1y >= 0 && p1y <= 1)) {
+			throw new RangeError('"p1y" must be a number between 0 and 1. ' + 'Got ' + p1y + 'instead.');
+		}
+		if (!(p2x >= 0 && p2x <= 1)) {
+			throw new RangeError('"p2x" must be a number between 0 and 1. ' + 'Got ' + p2x + 'instead.');
+		}
+		if (!(p2y >= 0 && p2y <= 1)) {
+			throw new RangeError('"p2y" must be a number between 0 and 1. ' + 'Got ' + p2y + 'instead.');
+		}
+
+		// Control points
+		this._p1 = { x: p1x, y: p1y };
+		this._p2 = { x: p2x, y: p2y };
+	};
+
+	CubicBezier.prototype._getCoordinateForT = function (t, p1, p2) {
+		var c = 3 * p1,
+			b = 3 * (p2 - p1) - c,
+			a = 1 - c - b;
+
+		return ((a * t + b) * t + c) * t;
+	};
+
+	CubicBezier.prototype._getCoordinateDerivateForT = function (t, p1, p2) {
+		var c = 3 * p1,
+			b = 3 * (p2 - p1) - c,
+			a = 1 - c - b;
+
+		return (3 * a * t + 2 * b) * t + c;
+	};
+
+	CubicBezier.prototype._getTForCoordinate = function (c, p1, p2, epsilon) {
+		if (!isFinite(epsilon) || epsilon <= 0) {
+			throw new RangeError('"epsilon" must be a number greater than 0.');
+		}
+		var t2, i, c2, d2;
+
+		// First try a few iterations of Newton's method -- normally very fast.
+		for (t2 = c, i = 0; i < 8; i = i + 1) {
+			c2 = this._getCoordinateForT(t2, p1, p2) - c;
+			if (Math.abs(c2) < epsilon) {
+				return t2;
+			}
+			d2 = this._getCoordinateDerivateForT(t2, p1, p2);
+			if (Math.abs(d2) < 1e-6) {
+				break;
+			}
+			t2 = t2 - c2 / d2;
+		}
+
+		// Fall back to the bisection method for reliability.
+		t2 = c;
+		var t0 = 0,
+			t1 = 1;
+
+		if (t2 < t0) {
+			return t0;
+		}
+		if (t2 > t1) {
+			return t1;
+		}
+
+		while (t0 < t1) {
+			c2 = this._getCoordinateForT(t2, p1, p2);
+			if (Math.abs(c2 - c) < epsilon) {
+				return t2;
+			}
+			if (c > c2) {
+				t0 = t2;
+			} else {
+				t1 = t2;
+			}
+			t2 = (t1 - t0) * 0.5 + t0;
+		}
+
+		// Failure.
+		return t2;
+	};
+
+	/**
+	 * Computes the point for a given t value.
+	 *
+	 * @param {number} t
+	 * @returns {Object} Returns an object with x and y properties
+	 */
+	CubicBezier.prototype.getPointForT = function (t) {
+
+		// Special cases: starting and ending points
+		if (t === 0 || t === 1) {
+			return { x: t, y: t };
+		}
+
+		// Check for correct t value (must be between 0 and 1)
+		if (t < 0 || t > 1) {
+			throw new RangeError('"t" must be a number between 0 and 1' + 'Got ' + t + ' instead.');
+		}
+
+		return {
+			x: this._getCoordinateForT(t, this._p1.x, this._p2.x),
+			y: this._getCoordinateForT(t, this._p1.y, this._p2.y)
+		};
+	};
+
+	CubicBezier.prototype.getTForX = function (x, epsilon) {
+		return this._getTForCoordinate(x, this._p1.x, this._p2.x, epsilon);
+	};
+
+	CubicBezier.prototype.getTForY = function (y, epsilon) {
+		return this._getTForCoordinate(y, this._p1.y, this._p2.y, epsilon);
+	};
+
+	/**
+	 * Computes auxiliary points using De Casteljau's algorithm.
+	 *
+	 * @param {number} t must be greater than 0 and lower than 1.
+	 * @returns {Object} with members i0, i1, i2 (first iteration),
+	 *	  j1, j2 (second iteration) and k (the exact point for t)
+	 */
+	CubicBezier.prototype._getAuxPoints = function (t) {
+		if (t <= 0 || t >= 1) {
+			throw new RangeError('"t" must be greater than 0 and lower than 1');
+		}
+
+
+		/* First series of auxiliary points */
+
+		// First control point of the left curve
+		var i0 = {
+				x: t * this._p1.x,
+				y: t * this._p1.y
+			},
+			i1 = {
+				x: this._p1.x + t * (this._p2.x - this._p1.x),
+				y: this._p1.y + t * (this._p2.y - this._p1.y)
+			},
+
+			// Second control point of the right curve
+			i2  = {
+				x: this._p2.x + t * (1 - this._p2.x),
+				y: this._p2.y + t * (1 - this._p2.y)
+			};
+
+
+		/* Second series of auxiliary points */
+
+		// Second control point of the left curve
+		var j0 = {
+				x: i0.x + t * (i1.x - i0.x),
+				y: i0.y + t * (i1.y - i0.y)
+			},
+
+			// First control point of the right curve
+			j1 = {
+				x: i1.x + t * (i2.x - i1.x),
+				y: i1.y + t * (i2.y - i1.y)
+			};
+
+		// The division point (ending point of left curve, starting point of right curve)
+		var k = {
+				x: j0.x + t * (j1.x - j0.x),
+				y: j0.y + t * (j1.y - j0.y)
+			};
+
+		return {
+			i0: i0,
+			i1: i1,
+			i2: i2,
+			j0: j0,
+			j1: j1,
+			k: k
+		};
+	};
+
+	/**
+	 * Divides the bezier curve into two bezier functions.
+	 *
+	 * De Casteljau's algorithm is used to compute the new starting, ending, and
+	 * control points.
+	 *
+	 * @param {number} t must be greater than 0 and lower than 1.
+	 *     t === 1 or t === 0 are the starting/ending points of the curve, so no
+	 *     division is needed.
+	 *
+	 * @returns {CubicBezier[]} Returns an array containing two bezier curves
+	 *     to the left and the right of t.
+	 */
+	CubicBezier.prototype.divideAtT = function (t) {
+		if (t < 0 || t > 1) {
+			throw new RangeError('"t" must be a number between 0 and 1. ' + 'Got ' + t + ' instead.');
+		}
+
+		// Special cases t = 0, t = 1: Curve can be cloned for one side, the other
+		// side is a linear curve (with duration 0)
+		if (t === 0 || t === 1) {
+			var curves = [];
+			curves[t] = CubicBezier.linear();
+			curves[1 - t] = this.clone();
+			return curves;
+		}
+
+		var left = {},
+			right = {},
+			points = this._getAuxPoints(t);
+
+		var i0 = points.i0,
+			i2 = points.i2,
+			j0 = points.j0,
+			j1 = points.j1,
+			k = points.k;
+
+		// Normalize derived points, so that the new curves starting/ending point
+		// coordinates are (0, 0) respectively (1, 1)
+		var factorX = k.x,
+			factorY = k.y;
+
+		left.p1 = {
+			x: i0.x / factorX,
+			y: i0.y / factorY
+		};
+		left.p2 = {
+			x: j0.x / factorX,
+			y: j0.y / factorY
+		};
+
+		right.p1 = {
+			x: (j1.x - factorX) / (1 - factorX),
+			y: (j1.y - factorY) / (1 - factorY)
+		};
+
+		right.p2 = {
+			x: (i2.x - factorX) / (1 - factorX),
+			y: (i2.y - factorY) / (1 - factorY)
+		};
+
+		return [
+			new CubicBezier(left.p1.x, left.p1.y, left.p2.x, left.p2.y),
+			new CubicBezier(right.p1.x, right.p1.y, right.p2.x, right.p2.y)
+		];
+	};
+
+	CubicBezier.prototype.divideAtX = function (x, epsilon) {
+		if (x < 0 || x > 1) {
+			throw new RangeError('"x" must be a number between 0 and 1. ' + 'Got ' + x + ' instead.');
+		}
+
+		var t = this.getTForX(x, epsilon);
+		return this.divideAtT(t);
+	};
+
+	CubicBezier.prototype.divideAtY = function (y, epsilon) {
+		if (y < 0 || y > 1) {
+			throw new RangeError('"y" must be a number between 0 and 1. ' + 'Got ' + y + ' instead.');
+		}
+
+		var t = this.getTForY(y, epsilon);
+		return this.divideAtT(t);
+	};
+
+	CubicBezier.prototype.clone = function () {
+		return new CubicBezier(this._p1.x, this._p1.y, this._p2.x, this._p2.y);
+	};
+
+	CubicBezier.prototype.toString = function () {
+		return "cubic-bezier(" + [
+			this._p1.x,
+			this._p1.y,
+			this._p2.x,
+			this._p2.y
+		].join(", ") + ")";
+	};
+
+	CubicBezier.linear = function () {
+		return new CubicBezier();
+	};
+
+	CubicBezier.ease = function () {
+		return new CubicBezier(0.25, 0.1, 0.25, 1.0);
+	};
+	CubicBezier.linear = function () {
+		return new CubicBezier(0.0, 0.0, 1.0, 1.0);
+	};
+	CubicBezier.easeIn = function () {
+		return new CubicBezier(0.42, 0, 1.0, 1.0);
+	};
+	CubicBezier.easeOut = function () {
+		return new CubicBezier(0, 0, 0.58, 1.0);
+	};
+	CubicBezier.easeInOut = function () {
+		return new CubicBezier(0.42, 0, 0.58, 1.0);
+	};
+}());
+
+
+
 (function (w, d, M) {
 	"use strict";
 	/* ---- ENVIRONMENT SETTINGS ---- */
@@ -113,8 +462,14 @@
 			minDistanceToLock: 5, //in pixels, if movement in one direction is X greater than the other, lock the movement direction
 			outOfBoundsSpeedReduction: 0.3, //0-1 the percentage of distance to move scroller vs finger movement when past max scroll bounds
 			snapTime: 200, //in ms, the amount of time to animate scrolling when snapping to a specific point on scrollEnd
-			friction: 0.95, //used in easing animation during a momentum scroll where velocities are supplied
-			minVelocityToDecelerate: 0.2
+			friction: 0.996, //used in easing animation during a momentum scroll where velocities are supplied
+			minVelocityToDecelerate: 0.2, //the initial velocity of a flick to trigger momentum
+			minMomentumVelocity: 0.20, //the velocity of momentum at which an animation should stop
+			maxMomentumVelocity: 2.4,//
+			bounceTime: 300, //ms
+			momentumTiming: new CubicBezier(0.18, 1.0, 0.27, 1.0),
+			bounceBackTiming: new CubicBezier(0, 0.25, 0, 1),
+			defaultTiming: new CubicBezier(0.18, 1.0, 0.27, 1.0)
 		};
 
 	function addEvent(el, type, fn, capture) {
@@ -127,7 +482,7 @@
 
 	/* ---- SCROLLER ---- */
 
-	function IScroll(el, options) {
+	IScroll = function (el, options) {
 		if (this instanceof IScroll === false) {
 			return new IScroll(el, options);
 		}
@@ -148,7 +503,7 @@
 			hScrollbarClass: '',
 			lockDirection: true,
 			momentum: true,
-			overshoot: true,
+			bounce: true,
 			//eventPassthrough: false,	TODO: preserve native vertical scroll on horizontal JS scroll (and vice versa)
 
 			HWCompositing: true,		// mostly a debug thing (set to false to skip hardware acceleration)
@@ -229,7 +584,6 @@
 			addEvent(this.wrapper, touchEventStart, this);
 		}
 
-		addEvent(this.scroller, eventTransitionEnd, this);
 		addEvent(this.wrapper, 'mouseover', this);
 		addEvent(this.wrapper, 'mouseout', this);
 
@@ -237,7 +591,7 @@
 			addEvent(this.wrapper, 'DOMMouseScroll', this);
 			addEvent(this.wrapper, 'mousewheel', this);
 		}
-	}
+	};
 
 	IScroll.prototype = {
 		handleEvent: function (e) {
@@ -263,9 +617,6 @@
 			case eventResize:
 				this.__resize();
 				break;
-			case eventTransitionEnd:
-				this.__transitionEnd(e);
-				break;
 			case 'DOMMouseScroll':
 			case 'mousewheel':
 				this.__wheel(e);
@@ -289,121 +640,178 @@
 			}
 		},
 
-		__animateVelocity: function (velocityX, velocityY) {
+		//Array<{{axis, dest, duration, timingFunc}}>
+		__executeAnimations: function (xAnimations, yAnimations) {
 			var self = this,
-				lastTime = getTime(),
+				startX = this.x,
+				startY = this.y,
+				startTime = getTime(),
 				now,
 				newX,
-				newY;
+				newY,
+				bezierPoint;
 
-			if (!velocityX && !velocityY) {
-				return;
+			console.log('x animations: ' + xAnimations.length);
+			console.log('y animations: ' + yAnimations.length)
+
+			function transitionStep() {
+				var xAxis, yAxis, duration;
+				if (xAnimations.length) {
+					xAxis = xAnimations.shift();
+				}
+
+				if (yAnimations.length) {
+					yAxis = yAnimations.shift();
+				}
+
+				if (!xAxis && !yAxis) {
+					removeEvent(self.scroller, eventTransitionEnd, transitionStep);
+				} else {
+					self.__transitionTime(M.max(xAxis ? xAxis.duration : 0, yAxis ? yAxis.duration : 0));
+					self.__pos(xAxis ? xAxis.destination : self.x, yAxis ? yAxis.destination : self.y);
+				}
 			}
 
 			function step() {
+				console.log('animate step');
+				if (self.isRAFing === false) {
+					console.log('stopped');
+					return;
+				}
 				now = getTime();
-
-				//if velocity is low enough, stop animating on that axis
-				if (M.abs(velocityX) > config.minVelocityToDecelerate) {
-					velocityX *= config.friction;
-				} else {
-					velocityX = 0;
-				}
-				if (M.abs(velocityY) > config.minVelocityToDecelerate) {
-					velocityY *= config.friction;
-				} else {
-					velocityY = 0;
-				}
-
-				newX = self.x + velocityX * (now - lastTime);
-				newY = self.y + velocityY * (now - lastTime);
-
-				//add mucho resistance if outside boundaries and can overshoot, otherwise hard stop
-				if (self.x > 0 || self.x < self.maxScrollX) {
-					if (self.options.overshoot) {
-						velocityX *= config.friction * config.friction;
-					} else {
-						newX = self.x > 0 ? 0 : self.maxScrollX;
-						velocityX = 0;
+				if (xAnimations.length) {
+					newX = xAnimations[0].getPointForT(now);
+					if (newX === xAnimations[0].destination) {
+						xAnimations.shift();
+						
+						if (xAnimations.length) {
+							xAnimations[0].startTime = now;
+						}
 					}
 				}
-				if (self.y > 0 || self.y < self.maxScrollY) {
-					if (self.options.overshoot) {
-						velocityY *= config.friction * config.friction;
-					} else {
-						newY = self.y > 0 ? 0 : self.maxScrollX;
+				if (yAnimations.length) {
+					newY = yAnimations[0].getPointForT(now);
+					if (newY === yAnimations[0].destination) {
+						yAnimations.shift();
+						
+						if (yAnimations.length) {
+							yAnimations[0].startTime = now;
+						}
 					}
 				}
-				console.log('velocity x ' + velocityX);
-				console.log('velocity y' + velocityY + ' y ' + newY);
-				self.__pos(newX, newY);
+				console.log('new y '+ newY);
+				self.__pos(newX || self.x, newY || self.y);
 
-				//if there is no more velocity, we are done animating
-				if (velocityX === 0 && velocityY === 0) {
+				if (!xAnimations.length && !yAnimations.length) {
 					self.isRAFing = false;
-				}
-
-				lastTime = now;
-
-				if (self.isRAFing) {
-					rAF(step);
 				} else {
-					self.resetPosition(false);
+					rAF(step);
 				}
 			}
 
-			this.isRAFing = true;
-			step();
+			if (this.options.useTransition) {
+				//addEvent(this.scroller, eventTransitionEnd, transitionStep);
+				transitionStep();
+			} else {
+				this.__transitionTime(0);
+				this.isRAFing = true;
+				if (xAnimations.length) {
+					xAnimations[0].startTime = startTime;
+				}
+				if (yAnimations.length) {
+					yAnimations[0].startTime = startTime;
+				}
+				step();
+				console.log('begin animating')
+			}
 		},
 
 		/**
 		 * uses requestAnimationFrame or shim to move scroller to destination.
-		 * @param  {number}			destX		the destination on x axis.
-		 * @param  {number}			destY		the destination on y axis.
-		 * @param  {number}			duration	the duration of the animation.
+		 * @param	{number}		destX		the destination on x axis.
+		 * @param	{number}		destY		the destination on y axis.
+		 * @param	{number}		durationX	the duration of the animation.
+		 * @param	{number}		durationY	the duration of the animation along the y axis.
+		 * @param	{CubicBezier=}	timingFunc	the cubic bezier object to use to calculate animation path.
 		 */
-		__animate: function (destX, destY, duration) {
-			var self = this,
-				startX,
-				startY,
-				distX,
-				distY,
-				destTime,
-				startTime = getTime(),
-				now,
-				easing,
-				step,
-				newX,
-				newY;
+		__animate: function (destX, destY, durationX, durationY, timingFunc) {
+			var self				= this,
+				distX				= destX - this.x,
+				distY				= destY - this.y,
+				overshotDistanceX	= 0,
+				overshotDistanceY	= 0,
+				pctX,
+				pctY,
+				xAnimations			= [],
+				yAnimations			= [];
 
-			startX = this.x;
-			startY = this.y;
-			distX = startX - destX;
-			distY = startY - destY;
-			destTime = startTime + duration;
-			//todo: rAF handlers are sent a timestamp object, but standards have chnaged. Consider using instead of creating another
-			step = function () {
-				now = getTime();
+			timingFunc = timingFunc || config.defaultTiming;
 
-				if (now >= destTime) {
-					self.isRAFing = false;
-					self.__pos(destX, destY);
-					self.resetPosition(false);
-					return;
+			/*	
+				if distance set is out of bounds, restrict to bounds if no bounce,
+				otherwise queue additional animation with more friction, which starts
+				at boundary with same velocity
+			*/
+
+			if (this.options.bounce) {
+				overshotDistanceX = destX > 0 ?
+						destX :
+						this.maxScrollX > destX ?
+								destX - this.maxScrollX :
+								0;
+				overshotDistanceY = destY > 0 ?
+						destY :
+						this.maxScrollY > destY ?
+								destY - this.maxScrollY :
+								0;
+				//cubic divideAtY where Y is percentage from (current to (end - overshot)) / (current to end)
+				//for second item in returned array, increase friction
+				if (overshotDistanceX !== 0 && M.abs(distX) > 0) {
+					pctX = M.min(M.abs(overshotDistanceX / distX), 1);
+					xAnimations.push(
+						new ScrollAnimation(this.x, destX - overshotDistanceX, durationX * (1 - pctX), timingFunc.divideAtY(pctX, 0.05)[0]),
+						new ScrollAnimation(destX - overshotDistanceX, destX - overshotDistanceX / 2, durationX / 2 * pctX, timingFunc.divideAtY(pctX, 0.05)[1]),
+						new ScrollAnimation(destX - overshotDistanceX / 2, destX > 0 ? 0 : this.maxScrollX, config.bounceTime, config.bounceBackTiming)
+					);
+				} else if (M.abs(distX) > 0) {
+					xAnimations.push(new ScrollAnimation(this.x, M.floor(destX), durationX, timingFunc));
 				}
 
-				now = (now - startTime) / duration - 1;
-				easing = M.sqrt(1 - now * now);
-				newX = (destX - startX) * easing + startX;
-				newY = (destY - startY) * easing + startY;
-				self.__pos(newX, newY);
+				if (overshotDistanceY !== 0 && M.abs(distY) > 0) {
+					pctY = M.min(M.abs(overshotDistanceY / distY), 1);
 
-				if (self.isRAFing) {
-					rAF(step);
+					yAnimations.push(
+						new ScrollAnimation(this.y, destY - overshotDistanceY, durationY * (1 - pctY), timingFunc.divideAtY(pctY, 0.05)[0]),
+						new ScrollAnimation(destY - overshotDistanceY, destY - overshotDistanceY / 2, durationY / 2 * pctY, timingFunc.divideAtY(pctY, 0.05)[1]),
+						new ScrollAnimation(destY - overshotDistanceY / 2, destY > 0 ? 0 : this.maxScrollY, config.bounceTime, config.bounceBackTiming)
+					);
+				} else if (M.abs(distY) > 0) {
+					yAnimations.push(new ScrollAnimation(this.y, M.floor(destY), durationY, timingFunc));
 				}
-			};
-			self.isRAFing = true;
-			rAF(step);
+			} else {
+				//keep scrolling in bounds
+				destX = destX > 0 ?
+						0 :
+						this.maxScrollX > destX ?
+								this.maxScrollX :
+								destX;
+				destY = destY > 0 ?
+						0 :
+						this.maxScrollY > destY ?
+								this.maxScrollY :
+								destY;
+
+				if (destX !== this.x) {
+					xAnimations.push(new ScrollAnimation(this.x, M.floor(destX), durationX, timingFunc));
+				}
+				if (destY !== this.y) {
+					yAnimations.push(new ScrollAnimation(this.y, M.floor(destY), durationY, timingFunc));
+				}
+			}
+
+			if (xAnimations.length || yAnimations.length) {
+				this.__executeAnimations(xAnimations, yAnimations);
+			}
 		},
 
 		__resize: function () {
@@ -476,13 +884,13 @@
 			addEvent(w, touchEventCancel, this);
 			addEvent(w, touchEventEnd, this);
 
-			this.initiated		= true;
-			this.moved			= false;
-			this.distX			= 0;
-			this.distY			= 0;
-			this.directionX		= 0;
-			this.directionY		= 0;
-			this.directionLocked = 0;
+			this.initiated			= true;
+			this.moved				= false;
+			this.distX				= 0;
+			this.distY				= 0;
+			this.directionX			= 0;
+			this.directionY			= 0;
+			this.directionLocked	= 0;
 
 			this.__transitionTime(0);
 
@@ -585,6 +993,7 @@
 			}
 
 			// Slow down if outside of the boundaries
+			// TODO: restrict to boundaries if we don't have options.bounce
 			if (newX > 0 || newX < this.maxScrollX) {
 				newX = this.x + deltaX * config.outOfBoundsSpeedReduction;
 			}
@@ -597,20 +1006,27 @@
 			this.directionY = deltaY > 0 ? -1 : deltaY < 0 ? 1 : 0;
 
 			this.positions.push(timestamp, newX, newY);
-			this.scrollTo(newX, newY, 0);
+			console.log('newy move: ' + newY);
+			this.__pos(newX, newY);
 		},
 
 		__end: function (e) {
+			removeEvent(w, touchEventMove, this);
+			removeEvent(w, touchEventCancel, this);
+			removeEvent(w, touchEventEnd, this);
+
 			if (!this.enabled || !this.initiated || this.waitReset) {
 				return;
 			}
 
-			var point		= hasPointer ? e : e.changedTouches[0],
-				velocityX,
-				velocityY,
-				duration	= getTime() - this.startTime,
-				newX		= this.x,
-				newY		= this.y,
+			var point			= hasPointer ? e : e.changedTouches[0],
+				duration		= getTime() - this.startTime,
+				newX			= this.x,
+				newY			= this.y,
+				momentumX,
+				momentumY,
+				scrollDurationX	= 0,
+				scrollDurationY	= 0,
 				snap,
 				lastScale;
 
@@ -626,10 +1042,6 @@
 			}
 
 			this.initiated = false;
-
-			removeEvent(w, touchEventMove, this);
-			removeEvent(w, touchEventCancel, this);
-			removeEvent(w, touchEventEnd, this);
 
 			// Reset if we were zooming
 			if (this.scaled) {
@@ -661,7 +1073,7 @@
 
 				if (this.x !== newX || this.y !== newY) {
 					this.waitReset = true;
-					this.scrollTo(newX, newY);
+					this.scrollTo(newX, newY, 0, 0);
 				}
 
 				this.scaled = false;
@@ -673,14 +1085,13 @@
 				return;
 			}
 
-			// reset if we are outside of the boundaries
-			if (this.resetPosition(false)) {
-				return;
-			}
-
 			if (this.options.momentum) {
-				velocityX = this.hasHorizontalScroll ? this.__momentum('h') : 0;
-				velocityY = this.hasVerticalScroll ? this.__momentum('v') : 0;
+				momentumX = this.hasHorizontalScroll ? this.__momentum('h', newX) : {position: newX, duration: 0};
+				momentumY = this.hasVerticalScroll ? this.__momentum('v', newY) : {position: newY, duration: 0};
+				newX = momentumX.position;
+				scrollDurationX = momentumX.duration;
+				newY = momentumY.position;
+				scrollDurationY = momentumY.duration;
 			}
 
 			if (this.options.snap) {
@@ -689,17 +1100,21 @@
 				newY = snap.y;
 				this.pageX = snap.pageX;
 				this.pageY = snap.pageY;
+				scrollDurationX = scrollDurationX || config.snapTime;
+				scrollDurationY = scrollDurationY || config.snapTime;
 			}
 
-			if (newX !== this.x || newY !== this.y || velocityX !== 0 || velocityY !== 0) {
-				this.scrollTo(newX, newY, config.snapTime, velocityX, velocityY);
+			if (newX !== this.x || newY !== this.y) {
+				this.scrollTo(newX, newY, scrollDurationX, scrollDurationY);
 			}
 		},
 
 		//todo: consider setting a maximum distance for these, in pixels
-		__momentum: function (dir) {
+		__momentum: function (dir, currentPos) {
 			var distance,
 				velocity,
+				duration,
+				newPosition,
 				i				= this.positions.length - 3,
 				lastPosition	= this.positions[this.positions.length - 3];
 
@@ -707,20 +1122,41 @@
 				i -= 3;
 			}
 			if (i < 0) { //total scrolling less than 100ms, don't do momentum
-				return {destination: dir === 'h' ? this.x : this.y, duration: 0};
+				return {
+					position: currentPos,
+					duration: 0
+				};
 			}
-			//velocity ^ 2 = initial velocity ^ 2 + 2 * acceleration * distance
 
-			distance = dir === 'h' ? (this.x - this.positions[i + 1]) : (this.y - this.positions[i + 2]); //pixel units
+			//(final velocity) ^ 2 = initial velocity ^ 2 + 2 * acceleration * distance
+			distance = dir === 'h' ? (currentPos - this.positions[i + 1]) : (currentPos - this.positions[i + 2]); //pixel units
 			//velocity = distance / time
 			velocity = distance / (lastPosition - this.positions[i]); // pixels / ms
+			//make sure velocity does not exceed maximum
+			velocity = M.abs(velocity) > config.maxMomentumVelocity ?
+					velocity < 0 ?
+							config.maxMomentumVelocity * -1 :
+							config.maxMomentumVelocity :
+					velocity;
 
-			console.log('velocity ' + velocity);
-			if (M.abs(velocity) < config.minVelocityForMomentum) {
-				return 0;
-			} else {
-				return velocity;
+			//console.log('velocity start: ' + velocity);
+			if (M.abs(velocity) < config.minMomentumVelocity) { //if velocity below minimum threshold, no momentum
+				return {
+					position: currentPos,
+					duration: 0
+				};
 			}
+
+			//caution: if minMomentum velocity set too low, could this be negative when velocity is very low.? test velocity < 0.1.
+			duration = M.log(config.minMomentumVelocity / M.abs(velocity)) / M.log(config.friction);
+
+			distance = velocity * (1 - M.pow(config.friction, duration + 1)) / (1 - config.friction);
+			newPosition = currentPos + distance;
+
+			return {
+				position: newPosition,
+				duration: duration
+			};
 		},
 
 		__transitionTime: function (duration) {
@@ -1007,7 +1443,7 @@
 		resetPosition: function (immediate) {
 			var x,
 				y,
-				velocity;
+				time = immediate ? 0 : config.snapTime;
 
 			if (this.x <= 0 && this.x >= this.maxScrollX && this.y <= 0 && this.y >= this.maxScrollY) {
 				return false;
@@ -1028,7 +1464,7 @@
 				y = this.maxScrollY;
 			}
 
-			this.scrollTo(x, y, immediate ? 0 : config.snapTime);
+			this.scrollTo(x, y, time, time, config.bounceBackTiming);
 
 			return true;
 		},
@@ -1040,14 +1476,13 @@
 			this.scrollTo(x, y, duration);
 		},
 
-		scrollTo: function (x, y, duration, velocityX, velocityY) {
-			if (!duration || this.options.useTransition) {
-				this.__transitionTime(duration);
+		scrollTo: function (x, y, durationX, durationY, timingFunc) {
+
+			if (!durationX && !durationY) {
+				this.__transitionTime(0);
 				this.__pos(x, y);
-			} else if (velocityX || velocityY) {
-				this.__animateVelocity(velocityX, velocityY);
 			} else {
-				this.__animate(x, y, duration);
+				this.__animate(x, y, durationX, durationY, timingFunc);
 			}
 		},
 
@@ -1135,6 +1570,8 @@
 
 	Scrollbar = function (scroller, dir) {
 		var indicator;
+
+		//todo: document variables used such as 'overshot'
 
 		this.el = d.createElement('div');
 		this.direction = dir;
@@ -1348,7 +1785,37 @@
 		}
 	};
 
+	ScrollAnimation = function(start, destination, duration, timingFunction) {
+		this.start = start;
+		this.startTime = 0;
+		this.destination = destination;
+		this.duration = duration;
+		this.timingFunction = timingFunction;
+		this.distance = destination - start;
+	};
+
+	ScrollAnimation.prototype = {
+
+		getPointForT: function (t) {
+			var pct				= (t - this.startTime) / this.duration,
+				bezierPoint;
+
+			console.log('pct: ' + pct);
+
+			if (pct >= 1) {
+				return this.destination;
+			}
+
+			bezierPoint	= this.timingFunction.getPointForT(pct);
+
+			console.log('bezier point: ' + bezierPoint.y);
+
+			return (this.distance * bezierPoint.y + this.start);
+		}
+	};
+
 	dummyStyle = null;	// free some mem?
 
-	w.IScroll = IScroll;
 }(window, document, Math));
+
+
