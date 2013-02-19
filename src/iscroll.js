@@ -15,17 +15,13 @@
 	dispatch relevent events
 	destroy function
 
-	Bug: Cubic Bezier starting velocity does not match initial velocity well over a range of values
-
-	Consider limited the bounceback to when velocity at max point is greater than a certain threshold.
-
 	Check for conflicts in global scope with new objects
 	
  */
-var IScroll, CubicBezier, ScrollAnimation;
 
 
-(function () {
+
+(function (w, d, M) {
 	//https://github.com/davidaurelio/css-beziers/commit/02adac1a3b7f7d07416697ec233c64ba7d144ccb
 	/**
 	 * @license
@@ -64,8 +60,16 @@ var IScroll, CubicBezier, ScrollAnimation;
 	 * have x and y coordinates between 0 and 1.
 	 *
 	 * This type of bezier curves can be used as CSS transform timing functions.
+	 * 
+	 * @constructor
+	 * @export
+	 * @param {number} p1x control point p1 x value between 0 and 1.
+	 * @param {number} p1y control point p1 y value between 0 and 1.
+	 * @param {number} p2x control point p2 x value between 0 and 1.
+	 * @param {number} p2y control point p2 y value between 0 and 1.
+	 * 
 	 */
-	CubicBezier = function (p1x, p1y, p2x, p2y) {
+	var CubicBezier = window.CubicBezier = function (p1x, p1y, p2x, p2y) {
 		if (!(p1x >= 0 && p1x <= 1)) {
 			throw new RangeError('"p1x" must be a number between 0 and 1. ' + 'Got ' + p1x + 'instead.');
 		}
@@ -176,11 +180,24 @@ var IScroll, CubicBezier, ScrollAnimation;
 		return this._getTForCoordinate(x, this._p1.x, this._p2.x, epsilon);
 	};
 
+	/**
+	 * Get the time that the Y value will be equal to a given amount within error bound episilon.
+	 * If error bound is insufficiently large, the original value is returned.
+	 * @param  {number} y       the y value to get the corresponding t value.
+	 * @param  {number} epsilon the size of the error ball desired.
+	 * @return {number}         the time at which y equals the given value, or the given
+	 *                          value if epison is insuffieciently large.
+	 */
 	CubicBezier.prototype.getTForY = function (y, epsilon) {
 		return this._getTForCoordinate(y, this._p1.y, this._p2.y, epsilon);
 	};
+	/**
+	 * Finds the slope of the curve at a given time
+	 * @param  {number} t the time value between 0 and 1.
+	 * @return {number}   the slope of the curve.
+	 */
 	CubicBezier.prototype.getDerivativeYForT = function (t) {
-		return this._getCoordinateDerivateForT(0, this._p1.y, this._p2.y);
+		return this._getCoordinateDerivateForT(t, this._p1.y, this._p2.y);
 	};
 
 	/**
@@ -255,7 +272,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 	 *     t === 1 or t === 0 are the starting/ending points of the curve, so no
 	 *     division is needed.
 	 *
-	 * @returns {CubicBezier[]} Returns an array containing two bezier curves
+	 * @returns {Array.<CubicBezier>} Returns an array containing two bezier curves
 	 *     to the left and the right of t.
 	 */
 	CubicBezier.prototype.divideAtT = function (t) {
@@ -344,9 +361,8 @@ var IScroll, CubicBezier, ScrollAnimation;
 	};
 
 	CubicBezier.linear = function () {
-		return new CubicBezier();
+		return new CubicBezier(0.0, 0.0, 1.0, 1.0);
 	};
-
 	CubicBezier.ease = function () {
 		return new CubicBezier(0.25, 0.1, 0.25, 1.0);
 	};
@@ -362,13 +378,13 @@ var IScroll, CubicBezier, ScrollAnimation;
 	CubicBezier.easeInOut = function () {
 		return new CubicBezier(0.42, 0, 0.58, 1.0);
 	};
-}());
 
 
+	/* ---- END: CUBIC BEZIER ---- */
 
-(function (w, d, M) {
-	"use strict";
+
 	/* ---- ENVIRONMENT SETTINGS ---- */
+
 	function prefixStyle(style, vendor) {
 		if (vendor === false) {
 			return false;
@@ -457,13 +473,14 @@ var IScroll, CubicBezier, ScrollAnimation;
 			return transitionEnd[vendor];
 		}()),
 		Scrollbar,
+		ScrollAnimation,
 		config = {
 			minStartDistance: 10, //in pixels, the distance a finger must move to begin the scrolling behaviour
 			minDistanceToLock: 5, //in pixels, if movement in one direction is X greater than the other, lock the movement direction
 			outOfBoundsSpeedReduction: 0.3, //0-1 the percentage of distance to move scroller vs finger movement when past max scroll bounds
 			snapTime: 200, //in ms, the amount of time to animate scrolling when snapping to a specific point on scrollEnd
 			friction: 0.996, //used in easing animation during a momentum scroll where velocities are supplied, try between .990 - .998
-			overshotFriction: 0.993,
+			overshotFriction: 0.985,
 			minVelocityToDecelerate: 0.2, //the initial velocity of a flick to trigger momentum
 			minMomentumVelocity: 0.20, //the velocity of momentum at which an animation should stop
 			maxMomentumVelocity: 2.4,
@@ -475,12 +492,47 @@ var IScroll, CubicBezier, ScrollAnimation;
 			defaultTiming: new CubicBezier(0.18, 1.0, 0.27, 1.0)
 		};
 
-	function addEvent(el, type, fn, capture) {
-		el.addEventListener(type, fn, !!capture);
+	/**
+	 * holds callback functions created in inner functions to remove handlers later.
+	 * @type {Object.<string, Function>}
+	 */
+	var savedEventHandlers = {};
+
+	//todo: jsdoc
+	/**
+	 * removes an event from the specified dom element
+	 * @param  {Node|Window}   el           the element to remove the event listener from.
+	 * @param  {string}   type         the name of the element.
+	 * @param  {Function|boolean} fn           the callback function.
+	 * @param  {boolean=}   capture      whether the event was triggered in the capture phase.
+	 * @param  {string=}   registerName a name of the callback function, used when the callback is an inner function
+	 * @return {undefined}
+	 */
+	function removeEvent(el, type, fn, capture, registerName) {
+		if (typeof registerName === 'string' && typeof savedEventHandlers[registerName] === 'function') {
+			fn = savedEventHandlers[registerName];
+			delete savedEventHandlers[registerName];
+		}
+		el.removeEventListener(type, fn, !!capture);
 	}
 
-	function removeEvent(el, type, fn, capture) {
-		el.removeEventListener(type, fn, !!capture);
+	/**
+	 * adds an event to the specified dom element
+	 * @param  {Node|Window}   el           the element to remove the event listener from.
+	 * @param  {string}   type         the name of the element.
+	 * @param  {Function} fn           the callback function.
+	 * @param  {boolean=}   capture      whether the event was triggered in the capture phase.
+	 * @param  {string=}   registerName a name of the callback function, used when the callback is an inner function
+	 * @return {undefined}
+	 */
+	function addEvent(el, type, fn, capture, registerName) {
+		el.addEventListener(type, fn, !!capture);
+		if (typeof registerName === 'string') {
+			if (typeof savedEventHandlers[registerName] === 'function') {
+				removeEvent(el, type, savedEventHandlers[registerName]);
+			}
+			savedEventHandlers[registerName] = fn;
+		}
 	}
 
 	/* ---- SCROLLER ---- */
@@ -488,10 +540,11 @@ var IScroll, CubicBezier, ScrollAnimation;
 	/**
 	 * The main access point for creating a scroller
 	 * @constructor
+	 * @export
 	 * @param {Node|string} el        wrapper of the scroller, or string selector for the element.
 	 * @param {Object} options scroll options to apply to this instance.
 	 */
-	IScroll = function (el, options) {
+	var IScroll = window.IScroll = function (el, options) {
 		if (this instanceof IScroll === false) {
 			return new IScroll(el, options);
 		}
@@ -499,17 +552,31 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 		this.wrapper = typeof el === 'string' ? d.querySelector(el) : el;
 		this.scroller = this.wrapper.children[0];
-		this.enable();
 
 		this.options = {
-			startX: 0,
-			startY: 0,
-			scrollX: false,
-			scrollY: true,
-			vScrollbarWrapperClass: '',
-			vScrollbarClass: '',
-			hScrollbarWrapperClass: '',
-			hScrollbarClass: '',
+			axis: {
+				'x': {
+					direction: 'x',
+					start: 0,
+					scroll: false,
+					hasScrollbar: false,
+					active: true,
+					scrollbarClass: '',
+					indicatorClass: '',
+					snapStep: 0
+				},
+				'y': {
+					direction: 'y',
+					start: 0,
+					scroll: true,
+					hasScrollbar: true,
+					active: true,
+					scrollbarClass: '',
+					indicatorClass: '',
+					snapStep: 0
+				}
+			},
+
 			lockDirection: true,
 			momentum: true,
 			bounce: true,
@@ -519,7 +586,6 @@ var IScroll, CubicBezier, ScrollAnimation;
 			useTransition: false,		//You may want to set this to false if requestAnimationFrame exists and is not shim
 			useTransform: true,
 
-			scrollbars: true,
 			interactiveScrollbars: true,
 			//hideScrollbars: true,		TODO: hide scrollbars when not scrolling
 			//shrinkScrollbars: false,	TODO: shrink scrollbars when dragging over the limits
@@ -531,8 +597,6 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 			snap: false,
 			snapThreshold: 10,
-			snapStepX: 0,
-			snapStepY: 0,
 			//flickNavigation: true,	TODO: go to next/prev slide on flick
 
 			zoom: false,
@@ -543,9 +607,18 @@ var IScroll, CubicBezier, ScrollAnimation;
 			//onFlick: null,			TODO: add flick custom event
 		};
 
-		for (i in options) {
-			this.options[i] = options[i];
+		function copyProperties(result, input) {
+			var i;
+			for (i in input) {
+				if (typeof input[i] === 'object') {
+					copyProperties(result[i], input[i]);
+				} else {
+					result[i] = input[i];
+				}
+			}
 		}
+
+		copyProperties(this.options, options);
 
 		// Normalize options
 		if (!this.options.HWCompositing) {
@@ -559,33 +632,26 @@ var IScroll, CubicBezier, ScrollAnimation;
 		if (hasTransform && this.options.zoom) {
 			this.scroller.style[transformOrigin] = '0 0';		// we need the origin to 0 0 for the zoom
 		}
+		this.axis = this.options.axis;
+		for (i in this.axis) {
+			this.axis[i].pos = this.axis[i].start;
+			this.axis[i].page = 0; // current page when paging in x direction, needed by snap, ignored otherwise
+			if (this.axis[i].hasScrollbar) {
+				this.axis[i].scrollbar = new Scrollbar(this, this.axis[i]);
+			}
+		}
 
-		this.x = this.options.startX;
-		this.y = this.options.startY;
 		this.isRAFing = false;	//controls whether we want to keep requesting the next animation frame
-		this.scale = 1;		//holds the current zoom amount
-		this.pageX = 0;		// current page when paging in x direction, needed by snap, ignored otherwise
-		this.pageY = 0;		// current page when paging in y direction, ignored otherwise
+		this.scale = 1;		//holds the current zoom amount	
 		this.waitReset = false; //boolean to prevent refresh if we are in the middle of another operation
 		this.currentPointer = null;	//tracks current pointer for browsers with pointer events
 		this.positions = [];//save off positions user has scrolled to along with timestamp for momemtum purposes
 
-		if (this.options.useTransition) {
-			this.scroller.style[transitionTimingFunction] = 'cubic-bezier(0.33,0.66,0.66,1)';
-		}
 
-		if (this.options.scrollbars === true) {
-			if (this.options.scrollY) {
-				this.vScrollbar = new Scrollbar(this, 'v');
-			}
-			if (this.options.scrollX) {
-				this.hScrollbar = new Scrollbar(this, 'h');
-			}
-		}
 		//refresh finishes the setup work
 		this.refresh();
 
-		this.__pos(this.x, this.y);
+		this.__pos(this.axis.x.pos, this.axis.y.pos);
 
 		addEvent(w, eventResize, this); //todo: debounce
 
@@ -602,14 +668,14 @@ var IScroll, CubicBezier, ScrollAnimation;
 		}
 	};
 
-	IScroll.prototype = {
+	window.IScroll.prototype = {
 		/**
 		 * Handles all dom events for the scroll wrapper element,
 		 * uses the event type to call the appropriate method.
 		 * @param  {Event} e the handled event.
 		 * @return {undefined}
 		 */
-		handleEvent: function (e) {
+		'handleEvent': function (e) {
 			switch (e.type) {
 
 			case touchEventStart:
@@ -636,7 +702,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 			case 'mousewheel':
 				this.__wheel(e);
 				break;
-			case 'mouseover':
+			case 'mouseover': //todo: make these optional
 				if (this.vScrollbar) {
 					this.vScrollbar.over();
 				}
@@ -658,130 +724,110 @@ var IScroll, CubicBezier, ScrollAnimation;
 		/**
 		 * runs an array of ScrollAnimations, axis are run in parallel and ech array is run in series,
 		 * without delays between.
-		 * @param  {Array<ScrollAnimation>} xAnimations an array of animations to be run on the x axis in serial.
-		 * @param  {Array<ScrollAnimation>} yAnimations an array of animations to be run on the y axis in serial.
+		 * @param  {Object.<string, Array.<ScrollAnimation>>} animations an object of array of animations to be run for each axis.
 		 * @return {undefined}
 		 */
-		__executeAnimations: function (xAnimations, yAnimations) {
+		__executeAnimations: function (animations) {
 			var self = this,
-				startX = this.x,
-				startY = this.y,
 				startTime = getTime(),
-				currentXAnimation,
-				currentYAnimation,
 				now,
-				newX,
-				newY,
-				bezierPoint;
+				newPos = {},
+				bezierPoint,
+				i;
 
-			var oldNow = getTime();
 
 			function transitionStep() {
-				var xAxis, yAxis, duration;
+				var duration = 0,
+					i;
 
-				currentXAnimation = xAnimations.length ? xAnimations.shift() : null;
-				currentYAnimation = yAnimations.length ? yAnimations.shift() : null;
-
-				if (!currentXAnimation && !currentYAnimation) {
-					removeEvent(self.scroller, eventTransitionEnd, transitionStep);
-				} else {
-					self.__transitionTime(
-						M.max(
-							currentXAnimation ? currentYAnimation.duration : 0,
-							currentYAnimation ? currentYAnimation.duration : 0
-						)
-					);
-					self.__pos(
-						currentXAnimation ? currentXAnimation.destination : self.x,
-						currentYAnimation ? currentYAnimation.destination : self.y
-					);
+				for (i in animations) {
+					if (animations[i].length) {
+						duration = M.max(animations[i][0].duration, duration);
+						newPos[i] = animations[i][0].destination;
+						animations[i].shift();
+					}
 				}
+				self.__transitionTime(duration);
+				self.__pos(newPos);
+
+				//if we have no more animations, remove event handler
+				for (i in animations) {
+					if (animations[i].length) {
+						return;
+					}
+				}
+				//todo BUG: need to remove this event when cancelling animation as well,
+				removeEvent(self.scroller, eventTransitionEnd, transitionStep, false, 'transitionStep');
 			}
 
 			//todo: use the new version of rAF parameter that already has the performance time.
 			function step() {
+				var i;
 				if (self.isRAFing === false) {
-					console.log('stopped');
 					return;
 				}
 				now = getTime();
-				if (currentXAnimation) {
-					newX = currentXAnimation.getPointForT(now);
-					if (newX === currentXAnimation.destination) {
-						currentXAnimation = xAnimations.length ? xAnimations.shift() : null;
-						if (currentXAnimation) {
-							currentXAnimation.begin(self.x, now);
+				for (i in animations) {
+					if (animations[i].length) {
+						newPos[i] = animations[i][0].getPointForT(now);
+						if (newPos[i] === animations[i][0].correctedDestination) {
+							animations[i].shift();
+							if (animations[i].length) {
+								animations[i][0].begin(self.axis[i].pos, now);
+							}
 						}
 					}
-				} else {
-					newX = self.x;
 				}
-				if (currentYAnimation) {
-					newY = currentYAnimation.getPointForT(now);
-					if (newY === currentYAnimation.destination) {
-						currentYAnimation = yAnimations.length ? yAnimations.shift() : null;
-						if (currentYAnimation) {
-							currentYAnimation.begin(self.y, now);
-						}
-					}
-				} else {
-					newY = self.y;
-				}
-				console.log('velocity: ' + ((newY - self.y) / (now - oldNow)));
-				oldNow = now;
-				self.__pos(newX, newY);
 
-				if (!currentXAnimation && !currentYAnimation) {
-					self.isRAFing = false;
-					console.log('STOP');
-				} else {
-					rAF(step);
+				self.__pos(newPos);
+
+				//if we still have more animations, request new frame
+				for (i in animations) {
+					if (animations[i].length) {
+						rAF.call(w, step);
+						return;
+					}
 				}
+				//no animations still active, stop rAF.
+				self.isRAFing = false;
 			}
 
 			if (this.options.useTransition) {
-				addEvent(this.scroller, eventTransitionEnd, transitionStep);
+				addEvent(this.scroller, eventTransitionEnd, transitionStep, false, 'transitionStep');
 				transitionStep();
 			} else {
 				this.__transitionTime(0);
 				this.isRAFing = true;
-				currentXAnimation = xAnimations.length ? xAnimations.shift() : null;
-				if (currentXAnimation) {
-					currentXAnimation.begin(self.x, startTime);
+				for (i in animations) {
+					if (animations[i].length) {
+						animations[i][0].begin(self.axis[i].pos, startTime);
+					}
 				}
-				currentYAnimation = yAnimations.length ? yAnimations.shift() : null;
-				if (currentYAnimation) {
-					currentYAnimation.begin(self.y, startTime);
-				}
-				rAF(step);
-				console.log('begin animating');
+				rAF.call(w, step);
+
 			}
 		},
 
 		/**
 		 * creates scrollAnimation objects from destination points and scroll options,
 		 * sends these, if any are created, to __executeAnimations.
-		 * @param	{number}		destX		the destination on x axis.
-		 * @param	{number}		destY		the destination on y axis.
-		 * @param	{number}		durationX	the duration of the animation.
-		 * @param	{number}		durationY	the duration of the animation along the y axis.
-		 * @param	{CubicBezier=}	timingFunc	the cubic bezier object to use to calculate animation path.
+		 * @param	{Object.<string, number>}		dest		the destination on each axis
+		 * @param	{Object.<string, number>}		duration	the duration of the animation.
+		 * @param	{CubicBezier=}					timingFunc	the cubic bezier object to use to calculate animation path.
 		 * @return  {undefined}
 		 */
-		__animate: function (destX, destY, durationX, durationY, timingFunc) {
+		__animate: function (dest, duration, timingFunc) {
 			var self				= this,
-				distX				= destX - this.x,
-				distY				= destY - this.y,
-				overshotDistanceX	= 0,
-				overshotDistanceY	= 0,
-				overshotDurationX,
-				overshotDurationY,
-				pctX,
-				pctY,
-				xAnimations			= [],
-				yAnimations			= [],
-				intermediateX		= this.x,
-				intermediateY		= this.y;
+				dist				= {},	//the distance travelled on each axis
+				overshotDistance	= 0,	//the distance to travel beyond scroll boundaries
+				overshotDuration	= 0,	//the time in ms to animate beyond scroll boundaries
+				pct					= 0,	//the percent of the distance that is out of bounds
+				animations			= {},	//holds array of animations for each axis
+				i;							//iterator
+
+			for (i in dest) {
+				dist[i] = dest[i] - this.axis[i].pos;
+			}
 
 			timingFunc = timingFunc || config.defaultTiming;
 
@@ -790,89 +836,64 @@ var IScroll, CubicBezier, ScrollAnimation;
 				otherwise queue additional animation with more friction, which starts
 				at boundary with same velocity
 			*/
-
-			if (this.options.bounce) {
-				overshotDistanceX = destX > 0 ?
-						destX :
-						this.maxScrollX > destX ?
-								destX - this.maxScrollX :
+			for (i in this.axis) {
+				animations[i] = [];
+				overshotDistance = dest[i] > 0 ?
+						dest[i] :
+						this.axis[i].maxScroll > dest[i] ?
+								dest[i] - this.axis[i].maxScroll :
 								0;
-				overshotDistanceY = destY > 0 ?
-						destY :
-						this.maxScrollY > destY ?
-								destY - this.maxScrollY :
-								0;
-				//todo: move this into utility function, call for each axis, return array
-				if (overshotDistanceX !== 0 && M.abs(distX) > 0) {
 
-					pctX = M.min(M.abs(overshotDistanceX / distX), 1);
-					if (pctX !== 1) {
-						//if we are already over the overscroll area, we don't need the initial slow down to the boundary
-						xAnimations.push(
-							new ScrollAnimation(destX - overshotDistanceX, durationX, timingFunc, 0, pctX)
+				pct = M.min(M.abs(overshotDistance / dist[i]), 1);
+
+				if (this.options.bounce) {
+					if (overshotDistance !== 0 && M.abs(dist[i]) > 0) {
+						if (pct !== 1) {
+							//first animation to boundary. pct will limit animation distance.
+							animations[i].push(
+								new ScrollAnimation(dest[i], duration[i], timingFunc, 0, (1 - pct))
+							);
+							//using overshot friction and initial velocity, we can construct the duration travelled out of bounds
+							overshotDuration =
+								M.max(0, M.log(config.minOvershotVelocity / M.abs(animations[i][0].endVelocity(this.axis[i].pos))) / M.log(config.overshotFriction));
+							overshotDistance =
+								(animations[i][0].endVelocity(this.axis[i].pos) / config.overshotTiming.getDerivativeYForT(0)) * overshotDuration;
+
+						} else {
+							overshotDuration = duration[i]; //note, duration should be using overshot friction as calculated by __momentum function
+							overshotDistance = dist[i];		//ibid
+						}
+						//second (or first if already over edge) animation to new overshot amount after factoring higher friction, or normal amount if
+						//momentum function calculated with increased friction
+						//third(second) animation to boundary
+						animations[i].push(
+							new ScrollAnimation((dest[i] > 0 ? 0 : this.axis[i].maxScroll) + overshotDistance, overshotDuration, config.overshotTiming),
+							new ScrollAnimation(dest[i] > 0 ? 0 : this.axis[i].maxScroll, config.bounceTime, config.bounceBackTiming)
 						);
-						overshotDurationX = M.max(0, M.log(config.minOvershotVelocity / M.abs(xAnimations[0].endVelocity(this.x))) / M.log(config.overshotFriction));
-						overshotDistanceX = (xAnimations[0].endVelocity(this.x) / config.overshotTiming.getDerivativeYForT(0)) * overshotDurationX;
-					} else {
-						overshotDurationX = durationX;
-						overshotDistanceX = distX;
-					}
-
-					xAnimations.push(
-						//todo: should use a unique timing function here, with config deceleration for bounds
-						//do same distance calc as __momentum
-						new ScrollAnimation(overshotDistanceX, overshotDurationX, config.overshotTiming),
-						new ScrollAnimation(destX > 0 ? 0 : this.maxScrollX, config.bounceTime, config.bounceBackTiming)
-					);
-				} else if (M.abs(distX) > 0) {
-					xAnimations.push(new ScrollAnimation(M.floor(destX), durationX, timingFunc));
-				}
-
-				if (overshotDistanceY !== 0 && M.abs(distY) > 0) {
-					//bug: consider edge case when initiating a bounce action after already overscrolling
-					pctY = M.min(M.abs(overshotDistanceY / distY), 1);
-					if (pctY !== 1) {
-						//if we are already over the overscroll area, we don't need the initial slow down to the boundary
-						yAnimations.push(
-							new ScrollAnimation(destY - overshotDistanceY, durationY, timingFunc, 0, pctY)
+					} else if (M.abs(dist[i]) > 0) {
+						//we aren't scrolling out of bounds, only 1 simple animation needed
+						animations[i].push(
+							new ScrollAnimation(M.floor(dest[i]), duration[i], timingFunc)
 						);
-						overshotDurationY = M.max(0, M.log(config.minOvershotVelocity / M.abs(yAnimations[0].endVelocity(this.y))) / M.log(config.overshotFriction));
-						overshotDistanceY = (yAnimations[0].endVelocity(this.y) / config.overshotTiming.getDerivativeYForT(0)) * overshotDurationY;
-					} else {
-						overshotDurationY = durationY;
-						overshotDistanceX = distX;
 					}
-
-					yAnimations.push(
-						new ScrollAnimation(overshotDistanceY, overshotDurationY, config.overshotTiming),
-						new ScrollAnimation(destY > 0 ? 0 : this.maxScrollY, config.bounceTime, config.bounceBackTiming)
-					);
-				} else if (M.abs(distY) > 0) {
-					yAnimations.push(new ScrollAnimation(M.floor(destY), durationY, timingFunc));
-				}
-			} else {
-				//keep scrolling in bounds
-				destX = destX > 0 ?
-						0 :
-						this.maxScrollX > destX ?
-								this.maxScrollX :
-								destX;
-				destY = destY > 0 ?
-						0 :
-						this.maxScrollY > destY ?
-								this.maxScrollY :
-								destY;
-
-				if (destX !== this.x) {
-					xAnimations.push(new ScrollAnimation(M.floor(destX), durationX, timingFunc));
-				}
-				if (destY !== this.y) {
-					yAnimations.push(new ScrollAnimation(M.floor(destY), durationY, timingFunc));
+					//end this.options.bounce
+				} else {
+					if (overshotDistance !== 0) {
+						//reduce duration by the percentage we will acutally be scrolling.
+						duration[i] = duration[i] * (1 - pct);
+					}
+					//add animation only if final destination is not current destination
+					if (dest[i] - overshotDistance !== this.axis[i].pos && duration[i] !== 0) {
+						animations[i].push(new ScrollAnimation(M.floor(dest[i] - overshotDistance), duration[i], timingFunc));
+					}
 				}
 			}
-
-			if (xAnimations.length || yAnimations.length) {
-				this.__executeAnimations(xAnimations, yAnimations);
+			for (i in animations) {
+				//check if we have any animation to perform
+				if (animations[i].length) {
+					this.__executeAnimations(animations);
+					break;
+				}
 			}
 		},
 
@@ -887,11 +908,14 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 		/**
 		 * moves the scroller element to the specified position, calls scrollbars to do the same
-		 * @param  {number} x the new position on the x axis.
-		 * @param  {number} y the new position on the y axis.
+		 * @param  {Object.<string, number>} positions new positions for each listed axis.
+
 		 * @return {undefined}
 		 */
-		__pos: function (x, y) {
+		__pos: function (positions) {
+			var x = typeof positions.x !== 'undefined' ? positions.x : this.axis.x.pos,
+				y = typeof positions.y !== 'undefined' ? positions.y : this.axis.y.pos,
+				i;
 			if (this.options.useTransform) {
 				this.scroller.style[transform] = 'translate(' + x + 'px,' + y + 'px) scale(' + this.scale + ')' + translateZ;
 			} else {
@@ -901,16 +925,13 @@ var IScroll, CubicBezier, ScrollAnimation;
 				this.scroller.style.top = y + 'px';
 			}
 
-			this.x = x;
-			this.y = y;
+			this.axis.x.pos = x;
+			this.axis.y.pos = y;
 
-			console.log('posY:   ' + this.y);
-
-			if (this.hasHorizontalScroll) {
-				this.hScrollbar.pos(this.x);
-			}
-			if (this.hasVerticalScroll) {
-				this.vScrollbar.pos(this.y);
+			for (i in this.axis) {
+				if (this.axis[i].active && this.axis[i].hasScrollbar) {
+					this.axis[i].scrollbar.pos(this.axis[i].pos);
+				}
 			}
 		},
 
@@ -935,8 +956,8 @@ var IScroll, CubicBezier, ScrollAnimation;
 		 * handles the touchEventStart event. sets initial values to begin a drag or zoom movement,
 		 * begin to capture move and and end events.
 		 * 
-		 * @param  {Event} e [description]
-		 * @return {[type]}   [description]
+		 * @param  {Event} e the touchEventStart event.
+		 * @return {undefined}
 		 */
 		__start: function (e) {
 			if (!this.enabled || this.waitReset) {
@@ -948,7 +969,8 @@ var IScroll, CubicBezier, ScrollAnimation;
 				x,
 				y,
 				c1,
-				c2;
+				c2,
+				i;
 
 			//filter non touch events and begin tracking first pointer
 			if (hasPointer) {
@@ -959,7 +981,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 				}
 
 				this.currentPointer = point.pointerId;
-				if (point.target.msSetPointerCapture) {
+				if (hasPointer) {
 					point.target.msSetPointerCapture(point.pointerId);
 				}
 			}
@@ -971,15 +993,18 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 			this.initiated			= true;
 			this.moved				= false;
-			this.distX				= 0;
-			this.distY				= 0;
-			this.directionX			= 0;
-			this.directionY			= 0;
-			this.directionLocked	= 0;
+			this.directionLocked	= false;
+
+			for (i in this.axis) {
+				this.axis[i].distance = 0;
+				this.axis[i].direction = 0;
+			}
 
 			this.__transitionTime(0);
 
 			this.isRAFing = false;		// stop the rAF animation (only with useTransition:false)
+			//cancel any further transition steps
+			removeEvent(this.scroller, eventTransitionEnd, null, false, 'transitionStep'); //(only with useTransition: true)
 
 			//todo: not pointer model compliant
 			if (this.options.zoom && hasTouch && e.touches.length > 1) {
@@ -1008,25 +1033,26 @@ var IScroll, CubicBezier, ScrollAnimation;
 				}
 				/*jslint regexp: false*/
 
-				if (x !== this.x || y !== this.y) {
+				if (x !== this.axis.x.pos || y !== this.axis.y.pos) {
 					//this is the case of stopping a current transition which may be occuring.
-					this.__pos(x, y);
+					this.__pos({'x': x, 'y': y});
 				}
 			}
 
-			this.pointX		= point.pageX;
-			this.pointY		= point.pageY;
+			for (i in this.axis) {
+				this.axis[i].point = point['page' + i.toUpperCase()];
+				// absolute start needed by snap to compute snap threashold
+				this.axis[i].absStart = this.axis[i].pos;
+			}
 
-			// absolute start needed by snap to compute snap threashold
-			this.absStartX	= this.x;
-			this.absStartY	= this.y;
 			this.startTime	= getTime();
 
 			//begin recording positions and timestamps, will be used for momentum calculations
 			this.positions	= [];
-			this.positions.push(this.startTime, this.x, this.y);
+			this.positions.push(this.startTime, this.axis.x.pos, this.axis.y.pos);
 
 		},
+		//TODO: appears __move is missing zoom events?
 		/**
 		 * handles touch moves events to update the scroll position
 		 * @param  {Event} e the touch move event.
@@ -1041,63 +1067,59 @@ var IScroll, CubicBezier, ScrollAnimation;
 			}
 
 			var point		= hasPointer ? e : e.touches[0],
-				deltaX		= this.hasHorizontalScroll ? point.pageX - this.pointX : 0,
-				deltaY		= this.hasVerticalScroll ? point.pageY - this.pointY : 0,
-				newX		= this.x + deltaX,
-				newY		= this.y + deltaY,
+				delta		= {},
+				newPoint	= {},
 				timestamp	= getTime(),
-				absDistX,
-				absDistY;
+				canMove		= false,
+				i;
 
-			//this.x and this.y will be set when actually doing the movement, not here
-			this.pointX		= point.pageX;
-			this.pointY		= point.pageY;
+			for (i in this.axis) {
+				delta[i] = this.axis[i].active ? point['page' + i.toUpperCase()] - this.axis[i].point : 0;
+				newPoint[i] = this.axis[i].pos + delta[i];
+				this.axis[i].distance += delta[i];
+				this.axis[i].point = point['page' + i.toUpperCase()];
 
-			this.distX		+= deltaX;
-			this.distY		+= deltaY;
-			absDistX		= M.abs(this.distX);
-			absDistY		= M.abs(this.distY);
-
-			// We need to move at least a cetain distance for the scrolling to initiate
-			if (absDistX < config.minStartDistance && absDistY < config.minStartDistance) {
-				return;
-			}
-
-			// If you are scrolling in one direction lock the other
-			if (!this.directionLocked && this.options.lockDirection) {
-				if (absDistX > absDistY + config.minDistanceToLock) {
-					this.directionLocked = 'h';		// lock horizontally
-				} else if (absDistY > absDistX + config.minDistanceToLock) {
-					this.directionLocked = 'v';		// lock vertically
-				} else {
-					this.directionLocked = 'n';		// no lock
+				if (M.abs(this.axis[i].distance) > config.minStartDistance) {
+					canMove = true;
 				}
 			}
 
-			if (this.directionLocked === 'h') {
-				newY = this.y;
-				deltaY = 0;
-			} else if (this.directionLocked === 'v') {
-				newX = this.x;
-				deltaX = 0;
-			}
-
-			// Slow down if outside of the boundaries
-			// TODO: restrict to boundaries if we don't have options.bounce
-			if (newX > 0 || newX < this.maxScrollX) {
-				newX = this.x + deltaX * config.outOfBoundsSpeedReduction;
-			}
-			if (newY > 0 || newY < this.maxScrollY) {
-				newY = this.y + deltaY * config.outOfBoundsSpeedReduction;
+			if (!canMove && !this.moved) {
+				// We need to move at least a cetain distance for the scrolling to initiate
+				return;
 			}
 
 			this.moved = true;
-			this.directionX = deltaX > 0 ? -1 : deltaX < 0 ? 1 : 0;
-			this.directionY = deltaY > 0 ? -1 : deltaY < 0 ? 1 : 0;
 
-			this.positions.push(timestamp, newX, newY);
-			console.log('newy move: ' + newY);
-			this.__pos(newX, newY);
+			// If you are scrolling in one direction lock the other
+			if (!this.directionLocked && this.options.lockDirection) {
+				if (M.abs(this.axis.x.distance) > M.abs(this.axis.y.distance) + config.minDistanceToLock) {
+					this.directionLocked = 'x';		// lock horizontally
+				} else if (M.abs(this.axis.y.distance) > M.abs(this.axis.x.distance) + config.minDistanceToLock) {
+					this.directionLocked = 'y';		// lock vertically
+				} else {
+					this.directionLocked = false;		// no lock
+				}
+			}
+
+			for (i in this.axis) {
+
+				if (i !== this.directionLocked) {
+					delete newPoint[i]; // remove new position for axis if locked on another axis.
+				} else if (newPoint[i] > 0 || newPoint[i] < this.axis[i].maxScroll) {
+					// Slow down if outside of the boundaries
+					if (this.options.bounce) {
+						newPoint[i] = this.axis[i].pos + delta[i] * config.outOfBoundsSpeedReduction;
+					} else {
+						newPoint[i] = newPoint[i] > 0 ? 0 : this.axis[i].maxScroll;
+					}
+				}
+				// set current direction
+				this.axis[i].direction = delta[i] > 0 ? -1 : delta[i] < 0 ? 1 : 0;
+			}
+
+			this.positions.push(timestamp, newPoint.x, newPoint.y);
+			this.__pos(newPoint);
 		},
 
 		/**
@@ -1118,14 +1140,12 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 			var point			= hasPointer ? e : e.changedTouches[0],
 				duration		= getTime() - this.startTime,
-				newX			= this.x,
-				newY			= this.y,
-				momentumX,
-				momentumY,
-				scrollDurationX	= 0,
-				scrollDurationY	= 0,
+				newPos			= {x: this.axis.x.pos, y: this.axis.y.pos},
+				momentum,
+				scrollDuration	= null,
 				snap,
-				lastScale;
+				lastScale,
+				i;
 
 			if (hasPointer) {
 				if (this.currentPointer !== point.pointerId) {
@@ -1153,26 +1173,15 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 				lastScale = this.scale / this.startScale;
 
-				newX = this.originX - this.originX * lastScale + this.startX;
-				newY = this.originY - this.originY * lastScale + this.startY;
+				newPos.x = this.originX - this.originX * lastScale + this.axis.x.start;
+				newPos.y = this.originY - this.originY * lastScale + this.axis.y.start;
 
-				if (newX > 0) {
-					newX = 0;
-				} else if (newX < this.maxScrollX) {
-					newX = this.maxScrollX;
+				for (i in this.axis) {
+					newPos[i] = M.min(0, M.max(newPos[i], this.axis[i].maxScroll));
 				}
 
-				if (newY > 0) {
-					newY = 0;
-				} else if (newY < this.maxScrollY) {
-					newY = this.maxScrollY;
-				}
-
-				if (this.x !== newX || this.y !== newY) {
-					this.waitReset = true;
-					this.scrollTo(newX, newY, 0, 0);
-				}
-
+				this.waitReset = true;
+				this.scrollTo(newPos);
 				this.scaled = false;
 				return;
 			}
@@ -1183,24 +1192,20 @@ var IScroll, CubicBezier, ScrollAnimation;
 			}
 
 			if (this.options.momentum) {
-				momentumX = this.hasHorizontalScroll ? this.__momentum('h', newX) : {position: newX, duration: 0};
-				momentumY = this.hasVerticalScroll ? this.__momentum('v', newY) : {position: newY, duration: 0};
-				newX = momentumX.position;
-				scrollDurationX = momentumX.duration;
-				newY = momentumY.position;
-				scrollDurationY = momentumY.duration;
+				momentum = this.__momentum(newPos);
+				newPos = momentum.position;
+				scrollDuration = momentum.duration;
 			}
 
 			if (this.options.snap) {
-				snap = this.__snap(newX, newY);
-				newX = snap.x;
-				newY = snap.y;
-				this.pageX = snap.pageX;
-				this.pageY = snap.pageY;
-				scrollDurationX = scrollDurationX || config.snapTime;
-				scrollDurationY = scrollDurationY || config.snapTime;
+				snap = this.__snap(newPos);
+				newPos = snap.position;
+				this.axis.x.page = snap.pageX;
+				this.axis.y.page = snap.pageY;
+				scrollDuration = snap.snapTime || scrollDuration;
 			}
-			this.scrollTo(newX, newY, scrollDurationX, scrollDurationY);
+
+			this.scrollTo(newPos, scrollDuration);
 		},
 
 		//todo: consider setting a maximum distance for these, in pixels
@@ -1208,61 +1213,63 @@ var IScroll, CubicBezier, ScrollAnimation;
 		/**
 		 * create a new ending position and duration of transition if/when
 		 * a flick is detected. requires a previous scrolling of more than 100ms.
-		 * 
-		 * @param  {string} dir								'h' or 'v' for direction
-		 * @param  {number} currentPos						the current position on the axis specified
-		 * @return {{position: number, duration: number}}   the final position and time in ms to reach the point
+		 * @param  {Object.<string, number>} currentPos														the current position of each axis specified.
+		 * @return {{position: Object.<string, number>, duration: Object.<string, number>}|Boolean	}		the final position and time in ms to reach the point.
 		 */
-		__momentum: function (dir, currentPos) {
+		__momentum: function (currentPos) {
 			var distance,
 				velocity,
-				duration,
-				newPosition,
+				outOfBounds,
+				duration		= {},
+				newPosition		= currentPos,
 				i				= this.positions.length - 3,
-				lastPosition	= this.positions[this.positions.length - 3];
+				lastPosition	= this.positions[this.positions.length - 3],
+				a; // iterator
 
 			while (lastPosition - this.positions[i] < 100) {
 				i -= 3;
 			}
-			if (i < 0) { //total scrolling less than 100ms, don't do momentum
+			if (i < 0) { // total scrolling less than 100ms, don't do momentum
 				return {
 					position: currentPos,
-					duration: 0
+					duration: false
 				};
 			}
+			for (a in this.axis) {
+				if (this.directionLocked !== false && this.directionLocked !== a) {
+					continue;
+				}
+				// (final velocity) ^ 2 = initial velocity ^ 2 + 2 * acceleration * distance
+				distance = (a === 'x' ? (currentPos[a] - this.positions[i + 1]) : (currentPos[a] - this.positions[i + 2])); //pixel units
+				// velocity = distance / time
+				velocity = distance / (lastPosition - this.positions[i]); // pixels / ms
+				// make sure velocity does not exceed maximum
+				velocity = M.abs(velocity) > config.maxMomentumVelocity ?
+						velocity < 0 ?
+								config.maxMomentumVelocity * -1 :
+								config.maxMomentumVelocity :
+						velocity;
 
-			//(final velocity) ^ 2 = initial velocity ^ 2 + 2 * acceleration * distance
-			distance = dir === 'h' ? (currentPos - this.positions[i + 1]) : (currentPos - this.positions[i + 2]); //pixel units
-			//velocity = distance / time
-			velocity = distance / (lastPosition - this.positions[i]); // pixels / ms
-			//make sure velocity does not exceed maximum
-			velocity = M.abs(velocity) > config.maxMomentumVelocity ?
-					velocity < 0 ?
-							config.maxMomentumVelocity * -1 :
-							config.maxMomentumVelocity :
-					velocity;
+				if (M.abs(velocity) < config.minMomentumVelocity) { //if velocity below minimum threshold, no momentum
+					duration[a] = 0;
+					continue;
+				}
 
-			//console.log('velocity start: ' + velocity);
-			if (M.abs(velocity) < config.minMomentumVelocity) { //if velocity below minimum threshold, no momentum
-				return {
-					position: currentPos,
-					duration: 0
-				};
+				outOfBounds = M.min(0, M.max(this.axis[a].pos, this.axis[a].maxScroll)) !== this.axis[a].pos;
+
+				//caution, unknown: if minMomentum velocity set too low, could this be negative when velocity is very low.? test velocity < 0.1.
+				duration[a] = M.log((outOfBounds ? config.minOvershotVelocity : config.minMomentumVelocity) / M.abs(velocity)) / M.log(outOfBounds ? config.overshotFriction : config.friction);
+
+				//use cubic bezier initial velocity && duration to compute final distance
+				distance = (velocity / (outOfBounds ? config.overshotTiming : config.momentumTiming).getDerivativeYForT(0)) * duration[a];
+
+				newPosition[a] = currentPos[a] + distance;
+
 			}
-//todo: this needs to handle overshot friction and overshot timing function stuff.
-			//caution, unknown: if minMomentum velocity set too low, could this be negative when velocity is very low.? test velocity < 0.1.
-			duration = M.log(config.minMomentumVelocity / M.abs(velocity)) / M.log(config.friction);
-
-			//use cubic bezier initial velocity && duration to compute final distance
-			distance = (velocity / config.momentumTiming.getDerivativeYForT(0)) * duration;
-
-			newPosition = currentPos + distance;
-
-			console.log('velocity: ' + velocity);
 
 			return {
 				position: newPosition,
-				duration: duration
+				duration: (duration.x || duration.y) ? duration : false
 			};
 		},
 
@@ -1272,14 +1279,15 @@ var IScroll, CubicBezier, ScrollAnimation;
 		 * @return {undefined}
 		 */
 		__transitionTime: function (duration) {
+			var i;
+
 			duration = duration || 0;
 			this.scroller.style[transitionDuration] = duration + 'ms';
 
-			if (this.hasHorizontalScroll) {
-				this.hScrollbar.indicator.transitionTime(duration);
-			}
-			if (this.hasVerticalScroll) {
-				this.vScrollbar.indicator.transitionTime(duration);
+			for (i in this.axis) {
+				if (this.axis[i].active && this.axis[i].hasScrollbar) {
+					this.axis[i].scrollbar.transitionTime(duration);
+				}
 			}
 		},
 
@@ -1304,22 +1312,22 @@ var IScroll, CubicBezier, ScrollAnimation;
 				return;
 			}
 
-			deltaX = this.x + wheelDeltaX * this.options.invertWheelDirection;
-			deltaY = this.y + wheelDeltaY * this.options.invertWheelDirection;
+			deltaX = this.axis.x.pos + wheelDeltaX * this.options.invertWheelDirection;
+			deltaY = this.axis.y.pos + wheelDeltaY * this.options.invertWheelDirection;
 
 			if (deltaX > 0) {
 				deltaX = 0;
-			} else if (deltaX < this.maxScrollX) {
-				deltaX = this.maxScrollX;
+			} else if (deltaX < this.axis.x.maxScroll) {
+				deltaX = this.axis.x.maxScroll;
 			}
 
 			if (deltaY > 0) {
 				deltaY = 0;
-			} else if (deltaY < this.maxScrollY) {
-				deltaY = this.maxScrollY;
+			} else if (deltaY < this.axis.y.maxScroll) {
+				deltaY = this.axis.y.maxScroll;
 			}
 
-			this.scrollTo(deltaX, deltaY, 0);
+			this.scrollTo({x: deltaX, y: deltaY}, 0);
 		},
 		//todo: doesn't work with pointer events
 		__zoom: function (e) {
@@ -1344,14 +1352,14 @@ var IScroll, CubicBezier, ScrollAnimation;
 			lastScale = scale / this.startScale;
 			//x = this.originX - this.originX * lastScale + this.x;
 			//y = this.originY - this.originY * lastScale + this.y;
-			x = this.originX - this.originX * lastScale + this.startX;
-			y = this.originY - this.originY * lastScale + this.startY;
+			x = this.originX - this.originX * lastScale + this.axis.x.start;
+			y = this.originY - this.originY * lastScale + this.axis.y.start;
 
-			//this.scroller.style[transform] = 'translate(' + x + 'px,' + y + 'px) scale(' + scale + ')' + translateZ;
+			this.scroller.style[transform] = 'translate(' + x + 'px,' + y + 'px) scale(' + scale + ')' + translateZ;
 
 			this.scale = scale;
-			this.scrollTo(x, y, 0);
-			this.scaled = true;
+
+			this.scaled = scale !== 1;
 		},
 
 		__snap: function (x, y) {
@@ -1364,7 +1372,8 @@ var IScroll, CubicBezier, ScrollAnimation;
 				};
 
 			// check if we matched the snap threashold
-			if (M.abs(x - this.absStartX) < this.options.snapThreshold && M.abs(y - this.absStartY) < this.options.snapThreshold) {
+			if (M.abs(x - this.axis.x.absStart) < this.options.snapThreshold &&
+						M.abs(y - this.axis.y.absStart) < this.options.snapThreshold) {
 				return current;
 			}
 
@@ -1376,7 +1385,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 			}
 
 			if (M.abs(result.pageX - this.pageX) === 0) {
-				result.pageX += this.directionX;
+				result.pageX += this.axis.x.direction;
 
 				if (result.pageX < 0) {
 					result.pageX = 0;
@@ -1386,13 +1395,13 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 				result.x = this.pages[result.pageX][result.pageY].x;
 
-				if (result.x < this.maxScrollX) {
-					result.x = this.maxScrollX;
+				if (result.x < this.axis.x.maxScroll) {
+					result.x = this.axis.x.maxScroll;
 				}
 			}
 
 			if (M.abs(result.pageY - this.pageY) === 0) {
-				result.pageY += this.directionY;
+				result.pageY += this.axis.y.direction;
 
 				if (result.pageY < 0) {
 					result.pageY = 0;
@@ -1402,8 +1411,8 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 				result.y = this.pages[result.pageX][result.pageY].y;
 
-				if (result.y < this.maxScrollY) {
-					result.y = this.maxScrollY;
+				if (result.y < this.axis.y.maxScroll) {
+					result.y = this.axis.y.maxScroll;
 				}
 			}
 
@@ -1412,6 +1421,9 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 		/* ---- PUBLIC METHODS ---- */
 
+		/**
+		 * @export
+		 */
 		getPage: function (x, y) {
 			if (!this.pages) {
 				return false;
@@ -1451,15 +1463,21 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 			return false;
 		},
-
+		/**
+		 * @export
+		 */
 		disable: function () {
 			this.enabled = false;
 		},
-
+		/**
+		 * @export
+		 */
 		enable: function () {
 			this.enabled = true;
 		},
-
+		/**
+		 * @export
+		 */
 		refresh: function () {
 			//todo: document these variables
 			var x, y,
@@ -1471,40 +1489,37 @@ var IScroll, CubicBezier, ScrollAnimation;
 			//todo: add jslint ignore to this line
 			this.wrapper.offsetHeight;	// Force browser recalculate layout (linters hate this)
 
-			this.wrapperWidth	= this.wrapper.clientWidth;
-			this.wrapperHeight	= this.wrapper.clientHeight;
+			this.wrapperWidth		= this.wrapper.clientWidth;
+			this.wrapperHeight		= this.wrapper.clientHeight;
+			this.scrollerWidth		= M.round(this.scroller.offsetWidth * this.scale);
+			this.scrollerHeight		= M.round(this.scroller.offsetHeight * this.scale);
+			this.axis.x.maxScroll	= M.min(this.wrapperWidth - this.scrollerWidth, 0);
+			this.axis.y.maxScroll	= M.min(this.wrapperHeight - this.scrollerHeight, 0);
+			this.axis.x.active		= this.axis.x.scroll && this.axis.x.maxScroll < 0;
+			this.axis.y.active		= this.axis.y.scroll && this.axis.y.maxScroll < 0;
 
-			this.scrollerWidth	= M.round(this.scroller.offsetWidth * this.scale);
-			this.scrollerHeight	= M.round(this.scroller.offsetHeight * this.scale);
-
-			this.maxScrollX		= M.min(this.wrapperWidth - this.scrollerWidth, 0);
-			this.maxScrollY		= M.min(this.wrapperHeight - this.scrollerHeight, 0);
-
-			this.hasHorizontalScroll	= this.options.scrollX && this.maxScrollX < 0;
-			this.hasVerticalScroll		= this.options.scrollY && this.maxScrollY < 0;
-
-			if (this.hScrollbar) {
-				this.hScrollbar.refresh(this.scrollerWidth, this.maxScrollX, this.x);
+			if (this.axis.x.hasScrollbar) {
+				this.axis.x.scrollbar.refresh(this.scrollerWidth, this.axis.x.maxScroll, this.axis.x.pos);
 			}
-			if (this.vScrollbar) {
-				this.vScrollbar.refresh(this.scrollerHeight, this.maxScrollY, this.y);
+			if (this.axis.y.hasScrollbar) {
+				this.axis.y.scrollbar.refresh(this.scrollerHeight, this.axis.y.maxScroll, this.axis.y.pos);
 			}
 
 			// this utterly complicated setup is needed to also support snapToElement
 			if (this.options.snap === true) {
-				this.options.snapStepX = this.options.snapStepX || this.wrapperWidth;
-				this.options.snapStepY = this.options.snapStepY || this.wrapperHeight;
+				this.axis.x.snapStep = this.axis.x.snapStep || this.wrapperWidth;
+				this.axis.y.snapStep = this.axis.y.snapStep || this.wrapperHeight;
 
 				this.pages = [];
 				i = 0;
 				x = 0;
-				cx = M.round(this.options.snapStepX / 2);
+				cx = M.round(this.axis.x.snapStep / 2);
 
 				while (x < this.scrollerWidth) {
 					this.pages[i] = [];
 					l = 0;
 					y = 0;
-					cy = M.round(this.options.snapStepY / 2);
+					cy = M.round(this.axis.y.snapStep / 2);
 
 					while (y < this.scrollerHeight) {
 						this.pages[i][l] = {
@@ -1514,12 +1529,12 @@ var IScroll, CubicBezier, ScrollAnimation;
 							cy: -cy
 						};
 
-						y += this.options.snapStepY;
-						cy += this.options.snapStepY;
+						y += this.axis.y.snapStep;
+						cy += this.axis.y.snapStep;
 						l++;
 					}
 
-					x += this.options.snapStepX;
+					x += this.axis.y.snapStep;
 					i++;
 				}
 			} else if (typeof this.options.snap === 'string') {
@@ -1557,54 +1572,62 @@ var IScroll, CubicBezier, ScrollAnimation;
 		},
 
 		//if we have scrolled too far, bounce back to the max amounts, otherwise do nothing
+		/**
+		 * @export
+		 */
 		resetPosition: function (immediate) {
-			var x,
-				y,
-				time = immediate ? 0 : config.snapTime;
+			var position = {},
+				time = immediate ? 0 : config.snapTime,
+				i,
+				needsReposition = false;
 
-			if (this.x <= 0 && this.x >= this.maxScrollX && this.y <= 0 && this.y >= this.maxScrollY) {
-				return false;
+			for (i in this.axis) {
+				position[i] = M.min(0, M.max(this.axis[i].pos, this.axis[i].maxScroll));
+				needsReposition = needsReposition || (position[i] !== this.axis[i].pos);
 			}
 
-			x = this.x;
-			y = this.y;
-
-			if (this.x > 0) {
-				x = 0;
-			} else if (this.x < this.maxScrollX) {
-				x = this.maxScrollX;
+			if (needsReposition) {
+				this.scrollTo(position, {x: time, y: time}, config.bounceBackTiming);
+				return true;
 			}
 
-			if (this.y > 0) {
-				y = 0;
-			} else if (this.y < this.maxScrollY) {
-				y = this.maxScrollY;
-			}
-			console.log('reset position: ' + x + '  ' + y);
-			this.scrollTo(x, y, time, time, config.bounceBackTiming);
-
-			return true;
+			return false;
 		},
+		/**
+		 * @export
+		 */
+		scrollBy: function (distance, duration) {
+			var i;
 
-		scrollBy: function (x, y, duration) {
-			x = this.x + x;
-			y = this.y + y;
+			for (i in distance) {
+				distance[i] += this.axis[i].pos;
+			}
 
-			this.scrollTo(x, y, duration);
+			this.scrollTo(distance, duration);
 		},
+		/**
+		 * @export
+		 */
+		scrollTo: function (destination, duration, timingFunc) {
 
-		scrollTo: function (x, y, durationX, durationY, timingFunc) {
-
-			if (!durationX && !durationY) {
+			if (!duration) {
 				this.__transitionTime(0);
-				this.__pos(x, y);
+				this.__pos(destination);
 				this.resetPosition(false);
 			} else {
-				this.__animate(x, y, durationX, durationY, timingFunc);
+				this.__animate(destination, duration, timingFunc);
 			}
 		},
-
+		/**
+		 * @export
+		 */
 		scrollToElement: function () {
+			// TODO
+		},
+		/**
+		 * @export
+		 */
+		destroy: function () {
 			// TODO
 		}
 	};
@@ -1615,7 +1638,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 	 * The draggable component of the scrollbar.
 	 * @constructor
 	 * @param {Scrollbar} scrollbar the scrollbar object on which the indicator resides
-	 * @param {Object} options   a set of options which can modify the default behaviour.
+	 * @param {Object=} options   a set of options which can modify the default behaviour.
 	 */
 	function Indicator(scrollbar, options) {
 		var i,
@@ -1639,19 +1662,18 @@ var IScroll, CubicBezier, ScrollAnimation;
 		this.maxPos = 0;
 		this.position = defaults.position;
 		this.size = 0;
-		this.sizeProperty = this.direction === 'v' ? 'height' : 'width';
+		this.sizeProperty = this.direction === 'y' ? 'height' : 'width';
 		this.el.style[transitionTimingFunction] = 'cubic-bezier(0.33,0.66,0.66,1)'; //todo: place in config file
 		this.el.style[transform] = translateZ;
 
-		if (this.scrollbar.scroller.options[this.direction + 'ScrollbarClass']) {
-			this.el.className = this.scrollbar.scroller.options[this.direction + 'ScrollbarClass'];
+		if (this.scrollbar.axis.indicatorClass) {
+			this.el.className = ' ' + this.scrollbar.axis.indicatorClass;
 		} else {
+			//todo: config file
 			this.el.style.cssText = cssVendor + 'box-sizing:border-box;box-sizing:border-box;position:absolute;background:rgba(0,0,0,0.5);border:1px;border-radius:3px';
 		}
 
 		this.scrollbar.el.appendChild(this.el);
-
-		this.refresh();
 	}
 
 	Indicator.prototype = {
@@ -1662,7 +1684,6 @@ var IScroll, CubicBezier, ScrollAnimation;
 			this.el.style[this.sizeProperty] = this.size + 'px';
 			this.maxPos = this.scrollbar.size - this.size;
 			this.sizeRatio = this.maxPos / maxScroll;
-			console.log('size ratio: ' + this.sizeRatio);
 
 			this.pos(position);
 		},
@@ -1680,7 +1701,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 			if (this.scrollbar.scroller.options.useTransform) { //todo: localize property to this object
 				this.el.style[transform] = 'translate(' + (this.direction === 'h' ? position + 'px,0' : '0,' + position + 'px') + ')' + translateZ;
 			} else {
-				this.el.style[(this.direction === 'h' ? 'left' : 'top')] = position + 'px';
+				this.el.style[(this.direction === 'x' ? 'left' : 'top')] = position + 'px';
 			}
 		},
 
@@ -1692,36 +1713,42 @@ var IScroll, CubicBezier, ScrollAnimation;
 
 
 	/* ---- SCROLLBAR ---- */
-
-	Scrollbar = function (scroller, dir) {
+	/**
+	 * A scrollbar.
+	 * @constructor
+	 * @param {IScroll}	scroller	the associated scroller object.
+	 * @param {Object}	axis		the associated axis.
+	 */
+	Scrollbar = function (scroller, axis) {
 		var indicator;
 
 		//todo: document variables used such as 'overshot'
 
 		this.el = d.createElement('div');
-		this.direction = dir;
+		this.direction = axis.direction;
 		this.scroller = scroller;
+		this.axis = axis;
 
-		if (this.scroller.options[this.direction + 'ScrollbarWrapperClass']) {
-			this.el.className += this.scroller.options.vScrollbarWrapperClass;
+		if (axis.wrapperClass) {
+			this.el.className += ' ' + this.axis.scrollbarClass;
 		} else {
+			//todo: config object
 			this.el.style.cssText = 'position:absolute;z-index:1;width:7px;bottom:2px;top:2px;right:1px';
 		}
 
 		this.scroller.wrapper.appendChild(this.el);
 
-		if (this.direction === 'h') {
-			this.sizeProperty = 'height';
+		if (this.direction === 'x') {
+			this.sizeProperty = 'width';
 			this.page = 'pageX';
 		} else {
-			this.sizeProperty = 'width';
+			this.sizeProperty = 'height';
 			this.page = 'pageY';
 		}
 
-		this.indicator = new Indicator(this);
-
 		this.size = 0;
 		this.currentPointer = null;
+		this.indicator = new Indicator(this);
 
 		if (!this.scroller.options.interactiveScrollbars) {
 			this.el.style.pointerEvents = 'none'; //todo: check if we need vendor specific here
@@ -1755,8 +1782,6 @@ var IScroll, CubicBezier, ScrollAnimation;
 		},
 
 		__start: function (e) {
-			var x,
-				y;
 
 			//filter touch events and begin tracking first pointer
 			if (hasPointer) {
@@ -1766,7 +1791,7 @@ var IScroll, CubicBezier, ScrollAnimation;
 				}
 
 				this.currentPointer = e.pointerId;
-				if (e.target.msSetPointerCapture) {
+				if (hasPointer) {
 					e.target.msSetPointerCapture(e.pointerId);
 				}
 			}
@@ -1823,10 +1848,10 @@ var IScroll, CubicBezier, ScrollAnimation;
 			//convert indicator distance to scroller distance
 			newPos = delta / this.indicator.sizeRatio;
 
-			if (this.direction === 'v') {
-				this.scroller.scrollBy(0, newPos, 0);
+			if (this.direction === 'y') {
+				this.scroller.scrollTo({y: newPos}, 0);
 			} else {
-				this.scroller.scrollBy(newPos, 0, 0);
+				this.scroller.scrollTo({x: newPos}, 0);
 			}
 
 			e.preventDefault();
@@ -1896,57 +1921,98 @@ var IScroll, CubicBezier, ScrollAnimation;
 		//todo: document what the refresh is doing
 		refresh: function (size, maxScroll, position) {
 			this.indicator.transitionTime(0);
-
-			if (this.direction === 'h') {
-				this.el.style.display = this.scroller.hasHorizontalScroll ? 'block' : 'none';
-			} else {
-				this.el.style.display = this.scroller.hasVerticalScroll ? 'block' : 'none';
-			}
+			this.el.style.display = this.axis.active ? 'block' : 'none';
 
 			this.el.offsetHeight;	// force refresh
-			this.size = this.direction === 'h' ? this.el.clientWidth : this.el.clientHeight;
+			this.size = this.direction === 'x' ? this.el.clientWidth : this.el.clientHeight;
 			this.indicator.refresh(size, maxScroll, position);
 			this.pos(position);
+			this.over(); //todo: hack for testing
+		},
+
+		transitionTime: function () {
+			this.indicator.transitionTime([].slice.call(arguments));
 		}
 	};
 
-	ScrollAnimation = function (destination, duration, timingFunction, startPct, endPct) {
-		if (duration < 0 || startPct < 0 || startPct > 1 || endPct < 0 || endPct > 1) {
-			debugger;
-		}
 
-		this.startTime = 0;
+	/**
+	 * @description Utility class to describe an animation and calculate values along its path.
+	 * @constructor
+	 * 
+	 * @property {number} 		startTime				the timing value at which the animation is started.
+	 * @property {number}		correctedDestination	the destination of the animation after considering the end percent.
+	 * @property {number}		startPos				starting position of the animation.
+	 * @property {number}		distance				the distance the animation will travel, not correcting for start and end percent.
+	 * @property {number}		destination				the end position of the animation, not correcting for end percent modifier.
+	 * @property {number}		duration				the timing value of the duration of the animation, not considering start and end percent.
+	 * @property {CubicBezier}	timingFunction			a CubicBezier object which describes the animation path.
+	 * @property {number}		startPct				value between 0 and 1 which indicates the percent along the timing function path
+	 *													that the animation calculation should start at.
+	 * @property {number}		endPct					value between 0 and 1 which indicates the percent along the timing function path
+	 *													that the animation calculation should end at.
+	 * @property {number}		pctDistance				value between 0 and 1 which indicated the percentage of the distance which the
+	 *													animation function should cover.
+	 * 
+	 * 
+	 * @param {number}		destination		the destination of the animation on its axis if the animation ran to completion.
+	 * @param {number}		duration		the duration of the animation in ms.
+	 * @param {CubicBezier}	timingFunction	a CubicBezier object which describes the animation path.
+	 * @param {number=}		startPct		value between 0 and 1 which indicates the percent along the timing function path
+	 *										that the animation calculation should start at.
+	 * @param {number=}		endPct			value between 0 and 1 which indicates the percent along the timing function path
+	 *										that the animation calculation should end at.
+	 */
+	ScrollAnimation = function (destination, duration, timingFunction, startPct, endPct) {
 		this.destination = destination;
 		this.duration = duration;
 		this.timingFunction = timingFunction;
 		this.startPct = startPct ? timingFunction.getTForY(startPct, 0.02) : 0;
 		this.endPct = endPct ? timingFunction.getTForY(endPct, 0.02) : 1;
+		this.pctDistance = endPct;
+		//this.startTime
+		//this.correctedDestination
+		//this.startPos
+		//this.distance
 	};
 
 	ScrollAnimation.prototype = {
-
+		/**
+		 * Calculate the new position of the animation for a given timing value,
+		 * or the final position if animation is complete.
+		 * @param  {number}	t	a timing value from window.performance.now if exists, otherwise new Date().now.
+		 * @return {number}		the position of the animation for the given time.
+		 */
 		getPointForT: function (t) {
 			var pct				= (t - this.startTime) / this.duration + this.startPct,
 				bezierPoint;
 
 			if (pct >= this.endPct) {
-				return this.destination;
-			}
-			if (isNaN(pct)) {
-				debugger;
+				return this.correctedDestination;
 			}
 
 			bezierPoint	= this.timingFunction.getPointForT(pct);
-			console.log('pct: ' + pct);
-			console.log('bezier: ' + bezierPoint.y + '  ' + bezierPoint.x);
 
 			return (this.distance * bezierPoint.y + this.startPos);
 		},
+		/**
+		 * Set needed properties for the animation to begin,
+		 * should be set 1 frame prior to calculating values of animation.
+		 * @param  {number} startPos  the current position of the axis.
+		 * @param  {number} startTime timing value of the current time.
+		 * @return {undefined}
+		 */
 		begin: function (startPos, startTime) {
 			this.startPos = startPos;
 			this.startTime = startTime;
 			this.distance = this.destination - this.startPos;
+			this.correctedDestination = this.startPos + this.distance * this.pctDistance;
 		},
+		/**
+		 * For a given starting position, calculate the velocity of the animation at its end, factoring in the end percent.
+		 * @param  {number} startPos a starting position on the axis.
+		 * @return {number}          the velocity of the animation at end percent.
+		 */
 		endVelocity: function (startPos) {
 			return this.timingFunction.getDerivativeYForT(this.endPct) * ((this.destination - startPos) / this.duration);
 		}
